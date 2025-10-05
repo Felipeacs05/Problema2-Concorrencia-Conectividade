@@ -1,0 +1,44 @@
+# Binários
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+servidor
+cliente
+
+# Arquivos de teste
+*.test
+*.out
+
+# Dependências Go
+vendor/
+go.sum
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Docker
+.docker/
+
+# Logs
+*.log
+mosquitto/log/*
+!mosquitto/log/.gitkeep
+
+# Dados persistentes
+mosquitto/data/*
+!mosquitto/data/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporários
+tmp/
+temp/
+
