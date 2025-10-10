@@ -609,74 +609,75 @@ func (s *Servidor) handleNotificarJogador(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "notificado"})
 }
 
-// ==================== MATCHMAKING GLOBAL ====================
+// ==================== HANDLERS DE MATCHMAKING GLOBAL ====================
 
+// handleSolicitarOponente é chamado por outro servidor procurando um oponente.
 func (s *Servidor) handleSolicitarOponente(c *gin.Context) {
-	var dados map[string]interface{}
-	if err := c.ShouldBindJSON(&dados); err != nil {
+	var req struct {
+		SolicitanteID   string `json:"solicitante_id"`
+		SolicitanteNome string `json:"solicitante_nome"`
+		ServidorOrigem  string `json:"servidor_origem"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	_ = dados["cliente_id"].(string)
-	clienteNome := dados["cliente_nome"].(string)
-	servidorOrigem := dados["servidor_origem"].(string)
-
-	log.Printf("[MATCHMAKING GLOBAL] Solicitação de %s@%s", clienteNome, servidorOrigem)
+	log.Printf("[MATCHMAKING-RX] Recebida solicitação de oponente de %s@%s", req.SolicitanteNome, req.ServidorOrigem)
 
 	s.mutexFila.Lock()
-	defer s.mutexFila.Unlock()
-
-	// Verifica se há alguém na fila local
 	if len(s.FilaDeEspera) > 0 {
-		oponente := s.FilaDeEspera[0]
-		s.FilaDeEspera = s.FilaDeEspera[1:]
+		// Oponente encontrado!
+		oponenteLocal := s.FilaDeEspera[0]
+		s.FilaDeEspera = s.FilaDeEspera[1:] // Remove da fila
+		s.mutexFila.Unlock()
 
-		// Criar partida entre servidores
+		log.Printf("[MATCHMAKING-RX] Oponente local %s encontrado para %s@%s", oponenteLocal.Nome, req.SolicitanteNome, req.ServidorOrigem)
+
+		// Este servidor (que encontrou o oponente) será o Host.
 		salaID := uuid.New().String()
-
-		// Este servidor será o Host
 		novaSala := &Sala{
 			ID:             salaID,
-			Jogadores:      []*Cliente{oponente},
-			Estado:         "AGUARDANDO_COMPRA",
+			Jogadores:      []*Cliente{oponenteLocal}, // Adiciona jogador local
+			Estado:         "AGUARDANDO_JOGADORES",
 			CartasNaMesa:   make(map[string]Carta),
 			PontosRodada:   make(map[string]int),
 			PontosPartida:  make(map[string]int),
 			NumeroRodada:   1,
 			Prontos:        make(map[string]bool),
-			ServidorHost:   s.MeuEndereco,
-			ServidorSombra: servidorOrigem,
+			ServidorHost:   s.MeuEndereco,    // Eu sou o Host
+			ServidorSombra: req.ServidorOrigem, // O outro servidor é a Sombra
 		}
 
 		s.mutexSalas.Lock()
 		s.Salas[salaID] = novaSala
 		s.mutexSalas.Unlock()
 
-		oponente.mutex.Lock()
-		oponente.Sala = novaSala
-		oponente.mutex.Unlock()
+		oponenteLocal.mutex.Lock()
+		oponenteLocal.Sala = novaSala
+		oponenteLocal.mutex.Unlock()
 
-		log.Printf("[MATCHMAKING GLOBAL] Partida criada: %s (local) vs %s@%s", oponente.Nome, clienteNome, servidorOrigem)
-
-		// Notifica oponente local
-		msg := protocolo.Mensagem{
-			Comando: "PARTIDA_ENCONTRADA",
-			Dados:   mustJSON(protocolo.DadosPartidaEncontrada{SalaID: salaID, OponenteNome: clienteNome}),
-		}
-		s.publicarParaCliente(oponente.ID, msg)
-
+		// Responde ao servidor solicitante com os detalhes da partida
 		c.JSON(http.StatusOK, gin.H{
 			"partida_encontrada": true,
 			"sala_id":            salaID,
-			"oponente_nome":      oponente.Nome,
+			"oponente_nome":      oponenteLocal.Nome,
 			"servidor_host":      s.MeuEndereco,
 		})
-	} else {
-		// Ninguém na fila, retorna sem match
-		c.JSON(http.StatusOK, gin.H{
-			"partida_encontrada": false,
+
+		// Notifica o jogador local
+		s.publicarParaCliente(oponenteLocal.ID, protocolo.Mensagem{
+			Comando: "PARTIDA_ENCONTRADA",
+			Dados: mustJSON(protocolo.DadosPartidaEncontrada{
+				SalaID:       salaID,
+				OponenteNome: req.SolicitanteNome,
+			}),
 		})
+
+	} else {
+		s.mutexFila.Unlock()
+		log.Printf("[MATCHMAKING-RX] Nenhum oponente local na fila para %s@%s", req.SolicitanteNome, req.ServidorOrigem)
+		c.JSON(http.StatusOK, gin.H{"partida_encontrada": false})
 	}
 }
 
