@@ -352,7 +352,7 @@ func (s *Servidor) iniciarAPI() {
 
 	// Rotas de matchmaking global
 	router.POST("/matchmaking/solicitar_oponente", s.handleSolicitarOponente)
-	router.POST("/matchmaking/aceitar_partida", s.handleAceitarPartida)
+	router.POST("/matchmaking/confirmar_partida", s.handleConfirmarPartida)
 
 	log.Printf("API REST iniciada em %s", s.MeuEndereco)
 	if err := router.Run(s.MeuEndereco); err != nil {
