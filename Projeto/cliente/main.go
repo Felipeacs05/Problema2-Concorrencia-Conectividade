@@ -97,10 +97,16 @@ func main() {
 
 func conectarMQTT(broker string) error {
 	opts := mqtt.NewClientOptions()
-	opts.AddBroker(broker)
+	// Adiciona todos os brokers conhecidos para a tentativa de conexão.
+	// A biblioteca tentará se conectar a eles em ordem.
+	opts.AddBroker("tcp://broker1:1883")
+	opts.AddBroker("tcp://broker2:1883")
+	opts.AddBroker("tcp://broker3:1883")
 	opts.SetClientID("cliente_" + time.Now().Format("20060102150405"))
 	opts.SetCleanSession(true)
 	opts.SetAutoReconnect(true) // Habilita a reconexão automática da biblioteca
+	opts.SetConnectRetry(true)
+	opts.SetMaxReconnectInterval(10 * time.Second)
 
 	// Handler para quando a conexão for perdida
 	opts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
