@@ -681,53 +681,48 @@ func (s *Servidor) handleSolicitarOponente(c *gin.Context) {
 	}
 }
 
-func (s *Servidor) handleAceitarPartida(c *gin.Context) {
-	var dados map[string]interface{}
-	if err := c.ShouldBindJSON(&dados); err != nil {
+// handleConfirmarPartida é chamado pelo servidor que iniciou o matchmaking para confirmar a participação.
+func (s *Servidor) handleConfirmarPartida(c *gin.Context) {
+	var req struct {
+		SalaID          string `json:"sala_id"`
+		SolicitanteID   string `json:"solicitante_id"`
+		SolicitanteNome string `json:"solicitante_nome"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	salaID := dados["sala_id"].(string)
-	clienteID := dados["cliente_id"].(string)
-	clienteNome := dados["cliente_nome"].(string)
+	log.Printf("[MATCHMAKING-CONFIRM] Recebida confirmação de %s para a sala %s", req.SolicitanteNome, req.SalaID)
 
-	log.Printf("[MATCHMAKING GLOBAL] Cliente %s aceitou partida %s", clienteNome, salaID)
+	s.mutexSalas.Lock()
+	sala, existe := s.Salas[req.SalaID]
+	s.mutexSalas.Unlock()
 
-	// Cria cliente remoto localmente
-	clienteRemoto := &Cliente{
-		ID:         clienteID,
-		Nome:       clienteNome,
-		Inventario: make([]Carta, 0),
+	if !existe {
+		c.JSON(http.StatusNotFound, gin.H{"error": "sala não encontrada"})
+		return
+	}
+
+	// Cria uma representação local para o jogador remoto
+	jogadorRemoto := &Cliente{
+		ID:   req.SolicitanteID,
+		Nome: req.SolicitanteNome,
+		Sala: sala,
 	}
 
 	s.mutexClientes.Lock()
-	s.Clientes[clienteID] = clienteRemoto
+	s.Clientes[jogadorRemoto.ID] = jogadorRemoto
 	s.mutexClientes.Unlock()
 
-	// Cria sala local como Sombra
-	novaSala := &Sala{
-		ID:             salaID,
-		Jogadores:      []*Cliente{clienteRemoto},
-		Estado:         "AGUARDANDO_COMPRA",
-		CartasNaMesa:   make(map[string]Carta),
-		PontosRodada:   make(map[string]int),
-		PontosPartida:  make(map[string]int),
-		NumeroRodada:   1,
-		Prontos:        make(map[string]bool),
-		ServidorHost:   dados["servidor_host"].(string),
-		ServidorSombra: s.MeuEndereco,
-	}
+	sala.mutex.Lock()
+	sala.Jogadores = append(sala.Jogadores, jogadorRemoto)
+	sala.Estado = "AGUARDANDO_COMPRA"
+	sala.mutex.Unlock()
 
-	s.mutexSalas.Lock()
-	s.Salas[salaID] = novaSala
-	s.mutexSalas.Unlock()
+	log.Printf("[MATCHMAKING-CONFIRM] Jogador remoto %s adicionado à sala %s. A partida pode começar.", req.SolicitanteNome, req.SalaID)
 
-	clienteRemoto.mutex.Lock()
-	clienteRemoto.Sala = novaSala
-	clienteRemoto.mutex.Unlock()
-
-	c.JSON(http.StatusOK, gin.H{"status": "aceito"})
+	c.JSON(http.StatusOK, gin.H{"status": "confirmado"})
 }
 
 // ==================== LÓGICA DE ELEIÇÃO DE LÍDER ====================
