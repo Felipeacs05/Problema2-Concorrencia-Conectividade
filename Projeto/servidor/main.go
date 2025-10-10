@@ -1339,55 +1339,19 @@ func (s *Servidor) encaminharJogadaParaHost(sala *Sala, clienteID, cartaID strin
 	jsonData, _ := json.Marshal(dados)
 	url := fmt.Sprintf("http://%s/partida/encaminhar_comando", host)
 
-	// Timeout para detectar falha do Host
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-	}
-
-	resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonData))
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
-		log.Printf("[FAILOVER] Erro ao encaminhar jogada para Host %s: %v. Promovendo Sombra...", host, err)
-		s.promoverSombraAHost(sala)
-		// Após a promoção, este servidor é o novo Host, então ele processa a jogada diretamente.
-		s.processarJogadaComoHost(sala, clienteID, cartaID)
+		log.Printf("Erro ao encaminhar jogada para Host: %v", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("[FAILOVER] Host %s retornou status %d. Promovendo Sombra...", host, resp.StatusCode)
-		s.promoverSombraAHost(sala)
-		s.processarJogadaComoHost(sala, clienteID, cartaID)
+		log.Printf("Host retornou status %d ao processar jogada", resp.StatusCode)
 		return
 	}
 
 	log.Printf("Jogada processada pelo Host com sucesso")
-}
-
-// promoverSombraAHost promove a Sombra a Host quando o Host original falha
-func (s *Servidor) promoverSombraAHost(sala *Sala) {
-	sala.mutex.Lock()
-	defer sala.mutex.Unlock()
-
-	// Garante que a promoção só ocorra uma vez
-	if sala.ServidorHost == s.MeuEndereco {
-		return
-	}
-
-	antigoHost := sala.ServidorHost
-	sala.ServidorHost = s.MeuEndereco
-	sala.ServidorSombra = "" // Este é o novo Host, não há Sombra por enquanto.
-
-	log.Printf("[FAILOVER] Sombra %s promovida a Host para a sala %s. Antigo Host: %s", s.MeuEndereco, sala.ID, antigoHost)
-
-	// Notifica jogadores da promoção
-	msg := protocolo.Mensagem{
-		Comando: "ATUALIZACAO_JOGO",
-		Dados: mustJSON(protocolo.DadosAtualizacaoJogo{
-			MensagemDoTurno: "Servidor principal da partida falhou. Continuando em um servidor reserva...",
-		}),
-	}
-	s.publicarEventoPartida(sala.ID, msg)
 }
 
 // processarJogadaComoHost processa uma jogada quando este servidor é o Host
