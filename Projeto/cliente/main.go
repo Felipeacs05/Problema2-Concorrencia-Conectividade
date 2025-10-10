@@ -98,18 +98,36 @@ func main() {
 func conectarMQTT(broker string) error {
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(broker)
+	
+	// Adiciona brokers alternativos para failover
+	opts.AddBroker("tcp://broker1:1883")
+	opts.AddBroker("tcp://broker2:1883")
+	opts.AddBroker("tcp://broker3:1883")
+	
 	opts.SetClientID("cliente_" + time.Now().Format("20060102150405"))
 	opts.SetCleanSession(true)
 	opts.SetAutoReconnect(true)
+	opts.SetConnectRetry(true)
+	opts.SetMaxReconnectInterval(10 * time.Second)
 
 	// Handler de mensagens perdidas
 	opts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
-		fmt.Printf("\n[ERRO] Conexão MQTT perdida: %v\n", err)
+		fmt.Printf("\n[AVISO] Conexão MQTT perdida: %v\n", err)
+		fmt.Println("[INFO] Tentando reconectar a brokers alternativos...")
 	})
 
 	// Handler de reconexão
 	opts.SetOnConnectHandler(func(client mqtt.Client) {
 		fmt.Println("\n[INFO] Conectado ao broker MQTT")
+		// Reinscreve nos tópicos após reconexão
+		if meuID != "" {
+			topicoEventos := fmt.Sprintf("clientes/%s/eventos", meuID)
+			client.Subscribe(topicoEventos, 0, handleMensagemServidor)
+		}
+		if salaAtual != "" {
+			topicoPartida := fmt.Sprintf("partidas/%s/eventos", salaAtual)
+			client.Subscribe(topicoPartida, 0, handleEventoPartida)
+		}
 	})
 
 	mqttClient = mqtt.NewClient(opts)
