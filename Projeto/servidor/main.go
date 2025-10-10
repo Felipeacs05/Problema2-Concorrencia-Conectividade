@@ -1347,7 +1347,8 @@ func (s *Servidor) encaminharJogadaParaHost(sala *Sala, clienteID, cartaID strin
 	resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		log.Printf("[FAILOVER] Host %s inacessível: %v. Iniciando promoção da Sombra...", host, err)
-		// Lógica de promoção será adicionada aqui
+		s.promoverSombraAHost(sala)
+		s.processarJogadaComoHost(sala, clienteID, cartaID) // Processa a jogada como o novo Host
 		return
 	}
 	defer resp.Body.Close()
@@ -1358,6 +1359,31 @@ func (s *Servidor) encaminharJogadaParaHost(sala *Sala, clienteID, cartaID strin
 	}
 
 	log.Printf("Jogada processada pelo Host com sucesso")
+}
+
+// promoverSombraAHost promove a Sombra a Host quando o Host original falha
+func (s *Servidor) promoverSombraAHost(sala *Sala) {
+	sala.mutex.Lock()
+	defer sala.mutex.Unlock()
+
+	if sala.ServidorHost == s.MeuEndereco {
+		return // Já sou o host, não fazer nada
+	}
+
+	antigoHost := sala.ServidorHost
+	sala.ServidorHost = s.MeuEndereco
+	sala.ServidorSombra = "" // Eu sou o novo Host
+
+	log.Printf("[FAILOVER] Sombra promovida a Host para a sala %s. Antigo Host: %s", sala.ID, antigoHost)
+
+	// Notifica jogadores da promoção
+	msg := protocolo.Mensagem{
+		Comando: "ATUALIZACAO_JOGO",
+		Dados: mustJSON(protocolo.DadosAtualizacaoJogo{
+			MensagemDoTurno: "O servidor da partida falhou. A partida continuará em um servidor reserva.",
+		}),
+	}
+	s.publicarEventoPartida(sala.ID, msg)
 }
 
 // processarJogadaComoHost processa uma jogada quando este servidor é o Host
