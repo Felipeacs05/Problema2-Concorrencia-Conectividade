@@ -1077,122 +1077,152 @@ func sampleRaridade() string {
 
 func (s *Servidor) entrarFila(cliente *Cliente) {
 	s.mutexFila.Lock()
-	
-	// Verifica se já tem alguém na fila local
+	// Tenta encontrar oponente na fila local primeiro
 	if len(s.FilaDeEspera) > 0 {
 		oponente := s.FilaDeEspera[0]
 		s.FilaDeEspera = s.FilaDeEspera[1:]
 		s.mutexFila.Unlock()
 
-		// Cria sala com os dois jogadores locais
+		// Cria sala localmente
 		s.criarSala(oponente, cliente)
-	} else {
-		// Adiciona à fila local
-		s.FilaDeEspera = append(s.FilaDeEspera, cliente)
-		s.mutexFila.Unlock()
-		
-		log.Printf("Cliente %s aguardando oponente", cliente.Nome)
-
-		// Notifica cliente
-		msg := protocolo.Mensagem{
-			Comando: "AGUARDANDO_OPONENTE",
-			Dados:   mustJSON(map[string]string{"mensagem": "Aguardando oponente..."}),
-		}
-		s.publicarParaCliente(cliente.ID, msg)
-
-		// Tenta matchmaking global com outros servidores
-		go s.tentarMatchmakingGlobal(cliente)
+		return
 	}
+
+	// Se não encontrou, adiciona à fila local e tenta matchmaking global
+	s.FilaDeEspera = append(s.FilaDeEspera, cliente)
+	s.mutexFila.Unlock()
+
+	log.Printf("Cliente %s (%s) entrou na fila de espera.", cliente.Nome, cliente.ID)
+	s.publicarParaCliente(cliente.ID, protocolo.Mensagem{
+		Comando: "AGUARDANDO_OPONENTE",
+		Dados:   mustJSON(map[string]string{"mensagem": "Procurando oponente em todos os servidores..."}),
+	})
+
+	// Dispara a busca por oponente em outros servidores em uma goroutine
+	go s.tentarMatchmakingGlobal(cliente)
 }
 
-// tentarMatchmakingGlobal tenta encontrar oponente em outros servidores
+// tentarMatchmakingGlobal é a rotina que busca oponentes em outros servidores.
 func (s *Servidor) tentarMatchmakingGlobal(cliente *Cliente) {
-	time.Sleep(2 * time.Second) // Aguarda um pouco antes de tentar global
+	// Delay para dar chance ao matchmaking local de outros servidores
+	time.Sleep(2 * time.Second)
 
-	// Verifica se ainda está na fila
+	// Garante que o cliente não encontrou uma partida enquanto esperava
 	s.mutexFila.Lock()
 	aindaNaFila := false
-	for _, c := range s.FilaDeEspera {
+	for i, c := range s.FilaDeEspera {
 		if c.ID == cliente.ID {
+			// Remove temporariamente para não ser encontrado por outro processo
+			s.FilaDeEspera = append(s.FilaDeEspera[:i], s.FilaDeEspera[i+1:]...)
 			aindaNaFila = true
 			break
 		}
 	}
-	if !aindaNaFila {
-		s.mutexFila.Unlock()
-		return // Já encontrou partida
-	}
 	s.mutexFila.Unlock()
 
-	// Obtém lista de servidores ativos
+	if !aindaNaFila {
+		log.Printf("[MATCHMAKING-TX] Cliente %s já encontrou partida, cancelando busca global.", cliente.Nome)
+		return
+	}
+
+	log.Printf("[MATCHMAKING-TX] Iniciando busca global para %s", cliente.Nome)
+
+	// Busca oponente em outros servidores
 	s.mutexServidores.RLock()
-	servidores := make([]string, 0)
+	servidoresAtivos := make([]string, 0, len(s.Servidores))
 	for addr, info := range s.Servidores {
 		if addr != s.MeuEndereco && info.Ativo {
-			servidores = append(servidores, addr)
+			servidoresAtivos = append(servidoresAtivos, addr)
 		}
 	}
 	s.mutexServidores.RUnlock()
 
-	// Tenta encontrar oponente em cada servidor
-	for _, servidor := range servidores {
-		dados := map[string]interface{}{
-			"cliente_id":       cliente.ID,
-			"cliente_nome":     cliente.Nome,
-			"servidor_origem":  s.MeuEndereco,
-		}
-
-		jsonData, _ := json.Marshal(dados)
-		url := fmt.Sprintf("http://%s/matchmaking/solicitar_oponente", servidor)
-
-		client := &http.Client{Timeout: 3 * time.Second}
-		resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonData))
-		if err != nil {
-			continue
-		}
-
-		var resultado map[string]interface{}
-		json.NewDecoder(resp.Body).Decode(&resultado)
-		resp.Body.Close()
-
-		if encontrou, ok := resultado["partida_encontrada"].(bool); ok && encontrou {
-			// Remove da fila local
-			s.mutexFila.Lock()
-			for i, c := range s.FilaDeEspera {
-				if c.ID == cliente.ID {
-					s.FilaDeEspera = append(s.FilaDeEspera[:i], s.FilaDeEspera[i+1:]...)
-					break
-				}
-			}
-			s.mutexFila.Unlock()
-
-			salaID := resultado["sala_id"].(string)
-			oponenteNome := resultado["oponente_nome"].(string)
-			servidorHost := resultado["servidor_host"].(string)
-
-			log.Printf("[MATCHMAKING GLOBAL] Partida encontrada para %s: sala %s", cliente.Nome, salaID)
-
-			// Aceita a partida
-			dadosAceite := map[string]interface{}{
-				"sala_id":       salaID,
-				"cliente_id":    cliente.ID,
-				"cliente_nome":  cliente.Nome,
-				"servidor_host": servidorHost,
-			}
-			jsonAceite, _ := json.Marshal(dadosAceite)
-			urlAceite := fmt.Sprintf("http://%s/matchmaking/aceitar_partida", s.MeuEndereco)
-			http.Post(urlAceite, "application/json", bytes.NewBuffer(jsonAceite))
-
-			// Notifica cliente
-			msg := protocolo.Mensagem{
-				Comando: "PARTIDA_ENCONTRADA",
-				Dados:   mustJSON(protocolo.DadosPartidaEncontrada{SalaID: salaID, OponenteNome: oponenteNome}),
-			}
-			s.publicarParaCliente(cliente.ID, msg)
-
+	for _, addr := range servidoresAtivos {
+		if s.realizarSolicitacaoMatchmaking(addr, cliente) {
+			// Encontrou partida, a função interna já tratou de tudo.
 			return
 		}
 	}
+
+	// Se chegou aqui, não encontrou oponente. Coloca o cliente de volta na fila.
+	log.Printf("[MATCHMAKING-TX] Nenhum oponente encontrado globalmente para %s. Devolvendo à fila.", cliente.Nome)
+	s.mutexFila.Lock()
+	s.FilaDeEspera = append(s.FilaDeEspera, cliente)
+	s.mutexFila.Unlock()
+}
+
+// realizarSolicitacaoMatchmaking envia uma requisição de oponente para um servidor específico.
+func (s *Servidor) realizarSolicitacaoMatchmaking(addr string, cliente *Cliente) bool {
+	log.Printf("[MATCHMAKING-TX] Enviando solicitação para %s", addr)
+	reqBody, _ := json.Marshal(map[string]string{
+		"solicitante_id":   cliente.ID,
+		"solicitante_nome": cliente.Nome,
+		"servidor_origem":  s.MeuEndereco,
+	})
+
+	httpClient := &http.Client{Timeout: 3 * time.Second}
+	resp, err := httpClient.Post(fmt.Sprintf("http://%s/matchmaking/solicitar_oponente", addr), "application/json", bytes.NewBuffer(reqBody))
+	if err != nil {
+		log.Printf("[MATCHMAKING-TX] Erro ao contatar servidor %s: %v", addr, err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	var res struct {
+		PartidaEncontrada bool   `json:"partida_encontrada"`
+		SalaID            string `json:"sala_id"`
+		OponenteNome      string `json:"oponente_nome"`
+		ServidorHost      string `json:"servidor_host"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		log.Printf("[MATCHMAKING-TX] Erro ao decodificar resposta de %s: %v", addr, err)
+		return false
+	}
+
+	if res.PartidaEncontrada {
+		log.Printf("[MATCHMAKING-TX] Partida encontrada no servidor %s! Sala: %s, Oponente: %s", addr, res.SalaID, res.OponenteNome)
+
+		// Cria a sala como Sombra neste servidor.
+		novaSala := &Sala{
+			ID:             res.SalaID,
+			Jogadores:      []*Cliente{cliente},
+			Estado:         "AGUARDANDO_COMPRA",
+			CartasNaMesa:   make(map[string]Carta),
+			PontosRodada:   make(map[string]int),
+			PontosPartida:  make(map[string]int),
+			NumeroRodada:   1,
+			Prontos:        make(map[string]bool),
+			ServidorHost:   res.ServidorHost,
+			ServidorSombra: s.MeuEndereco,
+		}
+
+		s.mutexSalas.Lock()
+		s.Salas[res.SalaID] = novaSala
+		s.mutexSalas.Unlock()
+
+		cliente.mutex.Lock()
+		cliente.Sala = novaSala
+		cliente.mutex.Unlock()
+
+		// Notifica o servidor Host para confirmar a participação do nosso jogador.
+		confirmBody, _ := json.Marshal(map[string]string{
+			"sala_id":          res.SalaID,
+			"solicitante_id":   cliente.ID,
+			"solicitante_nome": cliente.Nome,
+		})
+		http.Post(fmt.Sprintf("http://%s/matchmaking/confirmar_partida", res.ServidorHost), "application/json", bytes.NewBuffer(confirmBody))
+
+		// Notifica nosso cliente local.
+		s.publicarParaCliente(cliente.ID, protocolo.Mensagem{
+			Comando: "PARTIDA_ENCONTRADA",
+			Dados:   mustJSON(protocolo.DadosPartidaEncontrada{SalaID: res.SalaID, OponenteNome: res.OponenteNome}),
+		})
+		return true
+	}
+
+	log.Printf("[MATCHMAKING-TX] Servidor %s não encontrou oponente.", addr)
+	return false
 }
 
 func (s *Servidor) criarSala(j1, j2 *Cliente) {
