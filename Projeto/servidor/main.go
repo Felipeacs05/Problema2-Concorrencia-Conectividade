@@ -1339,9 +1339,15 @@ func (s *Servidor) encaminharJogadaParaHost(sala *Sala, clienteID, cartaID strin
 	jsonData, _ := json.Marshal(dados)
 	url := fmt.Sprintf("http://%s/partida/encaminhar_comando", host)
 
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonData))
+	// Adiciona timeout para detectar falha do Host
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
-		log.Printf("Erro ao encaminhar jogada para Host: %v", err)
+		log.Printf("[FAILOVER] Host %s inacessível: %v. Iniciando promoção da Sombra...", host, err)
+		// Lógica de promoção será adicionada aqui
 		return
 	}
 	defer resp.Body.Close()
