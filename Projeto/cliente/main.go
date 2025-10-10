@@ -116,6 +116,19 @@ func conectarMQTT(broker string) error {
 	// Handler para quando a conexão for restabelecida
 	opts.SetOnConnectHandler(func(client mqtt.Client) {
 		fmt.Println("\n[INFO] Conectado ao broker MQTT.")
+		// Reinscreve nos tópicos para garantir o recebimento de mensagens após reconexão.
+		if meuID != "" {
+			topicoEventos := fmt.Sprintf("clientes/%s/eventos", meuID)
+			if token := client.Subscribe(topicoEventos, 0, handleMensagemServidor); token.Wait() && token.Error() != nil {
+				log.Printf("Erro ao reinscrever no tópico de eventos: %v", token.Error())
+			}
+		}
+		if salaAtual != "" {
+			topicoPartida := fmt.Sprintf("partidas/%s/eventos", salaAtual)
+			if token := client.Subscribe(topicoPartida, 0, handleEventoPartida); token.Wait() && token.Error() != nil {
+				log.Printf("Erro ao reinscrever no tópico da partida: %v", token.Error())
+			}
+		}
 	})
 
 	mqttClient = mqtt.NewClient(opts)
