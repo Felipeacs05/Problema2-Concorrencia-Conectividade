@@ -216,6 +216,13 @@ func processarMensagemServidor(msg protocolo.Mensagem) {
 			log.Printf("Erro ao se inscrever no tópico da partida: %v", token.Error())
 		}
 
+	case "TROCA_CONCLUIDA":
+		var resp protocolo.TrocarCartasResp
+		json.Unmarshal(msg.Dados, &resp)
+		fmt.Printf("\n[TROCA] %s\n", resp.Mensagem)
+		mostrarCartas() // Mostra o inventário atualizado
+		fmt.Print("> ")
+
 	case "PACOTE_RESULTADO":
 		var dados protocolo.ComprarPacoteResp
 		json.Unmarshal(msg.Dados, &dados)
