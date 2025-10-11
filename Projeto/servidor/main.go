@@ -670,7 +670,8 @@ func (s *Servidor) handleSolicitarOponente(c *gin.Context) {
 			Comando: "PARTIDA_ENCONTRADA",
 			Dados: mustJSON(protocolo.DadosPartidaEncontrada{
 				SalaID:       salaID,
-				OponenteNome: req.SolicitanteNome,
+				OponenteID:   oponenteLocal.ID, // Adiciona o ID do oponente
+				OponenteNome: oponenteLocal.Nome,
 			}),
 		})
 
@@ -1216,7 +1217,7 @@ func (s *Servidor) realizarSolicitacaoMatchmaking(addr string, cliente *Cliente)
 		// Notifica nosso cliente local.
 		s.publicarParaCliente(cliente.ID, protocolo.Mensagem{
 			Comando: "PARTIDA_ENCONTRADA",
-			Dados:   mustJSON(protocolo.DadosPartidaEncontrada{SalaID: res.SalaID, OponenteNome: res.OponenteNome}),
+			Dados:   mustJSON(protocolo.DadosPartidaEncontrada{SalaID: res.SalaID, OponenteID: "oponente_remoto", OponenteNome: res.OponenteNome}), // O ID exato do oponente não é conhecido aqui, mas o cliente precisa de um valor.
 		})
 		return true
 	}
@@ -1258,11 +1259,11 @@ func (s *Servidor) criarSala(j1, j2 *Cliente) {
 	// Notifica jogadores
 	msg1 := protocolo.Mensagem{
 		Comando: "PARTIDA_ENCONTRADA",
-		Dados:   mustJSON(protocolo.DadosPartidaEncontrada{SalaID: salaID, OponenteNome: j2.Nome}),
+		Dados:   mustJSON(protocolo.DadosPartidaEncontrada{SalaID: salaID, OponenteID: j2.ID, OponenteNome: j2.Nome}),
 	}
 	msg2 := protocolo.Mensagem{
 		Comando: "PARTIDA_ENCONTRADA",
-		Dados:   mustJSON(protocolo.DadosPartidaEncontrada{SalaID: salaID, OponenteNome: j1.Nome}),
+		Dados:   mustJSON(protocolo.DadosPartidaEncontrada{SalaID: salaID, OponenteID: j1.ID, OponenteNome: j1.Nome}),
 	}
 
 	s.publicarParaCliente(j1.ID, msg1)
