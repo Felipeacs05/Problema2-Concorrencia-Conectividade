@@ -107,6 +107,16 @@ test-build: ## Testa compilação local
 	cd cliente && $(GO) build -o ../bin/cliente
 	@echo "$(COLOR_GREEN)Compilação bem-sucedida$(COLOR_RESET)"
 
+test-unit: ## Executa testes unitários
+	@echo "$(COLOR_BLUE)Executando testes unitários...$(COLOR_RESET)"
+	cd servidor && $(GO) test -v -cover
+	@echo "$(COLOR_GREEN)Testes concluídos$(COLOR_RESET)"
+
+test-bench: ## Executa benchmarks
+	@echo "$(COLOR_BLUE)Executando benchmarks...$(COLOR_RESET)"
+	cd servidor && $(GO) test -bench=. -benchmem
+	@echo "$(COLOR_GREEN)Benchmarks concluídos$(COLOR_RESET)"
+
 test-lider: ## Testa eleição de líder (para servidor 1)
 	@echo "$(COLOR_YELLOW)Parando servidor 1 (líder atual)...$(COLOR_RESET)"
 	$(DOCKER_COMPOSE) stop servidor1
