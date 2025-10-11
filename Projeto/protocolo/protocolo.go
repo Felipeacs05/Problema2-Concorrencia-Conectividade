@@ -55,6 +55,7 @@ type DadosLogin struct {
 // Notificação de que uma partida foi encontrada
 type DadosPartidaEncontrada struct {
 	SalaID       string `json:"salaID"`       // ID único da sala de jogo criada
+	OponenteID   string `json:"oponenteID"`   // ID do oponente para referência
 	OponenteNome string `json:"oponenteNome"` // Nome do oponente encontrado
 }
 
