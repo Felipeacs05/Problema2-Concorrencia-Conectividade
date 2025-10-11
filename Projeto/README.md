@@ -269,25 +269,33 @@ docker-compose start broker1
 - [x] Encaminhamento de comandos via API REST
 - [x] Sincronização de estado após cada jogada
 - [x] Re-publicação de eventos pela Sombra
+- [x] Promoção automática da Sombra a Host em caso de falha
 
 ### ✅ Lógica de Jogo
-- [x] Matchmaking entre jogadores
+- [x] Matchmaking entre jogadores (local e global)
 - [x] Sistema de cartas com raridades (C, U, R, L)
 - [x] Compra de pacotes do estoque distribuído
 - [x] Jogadas e resolução de vencedores
 - [x] Chat entre jogadores
 - [x] Finalização de partidas
+- [x] Troca de cartas entre jogadores
 
 ### ✅ Cliente
 - [x] Escolha de servidor na conexão
 - [x] Interface interativa via terminal
 - [x] Subscrição a eventos MQTT
 - [x] Publicação de comandos
+- [x] Failover automático de brokers MQTT
+
+### ✅ Testes
+- [x] Testes unitários do servidor
+- [x] Benchmarks de performance
+- [x] Scripts de teste automatizados
 
 ## Melhorias Futuras
 
 ### Recuperação de Falhas
-- [ ] Promoção automática da Sombra a Host
+- [x] Promoção automática da Sombra a Host
 - [ ] Redistribuição de clientes em caso de falha de servidor
 - [ ] Persistência de estado em disco
 
@@ -305,7 +313,7 @@ docker-compose start broker1
 ### Funcionalidades
 - [ ] Matchmaking por nível/ranking
 - [ ] Torneios e ligas
-- [ ] Troca de cartas entre jogadores (já definido no protocolo)
+- [x] Troca de cartas entre jogadores
 - [ ] Sistema de recompensas
 
 ## Tecnologias Utilizadas
