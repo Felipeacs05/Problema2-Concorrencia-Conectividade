@@ -32,10 +32,12 @@ type ComprarPacoteResp struct {
 
 // Estrutura para a nova funcionalidade de troca de cartas
 type TrocarCartasReq struct {
-	IDJogadorOferta   string `json:"id_jogador_oferta"`
-	IDJogadorDesejado string `json:"id_jogador_desejado"`
-	IDCartaOferecida  string `json:"id_carta_oferecida"`
-	IDCartaDesejada   string `json:"id_carta_desejada"`
+	IDJogadorOferta     string `json:"id_jogador_oferta"`
+	NomeJogadorOferta   string `json:"nome_jogador_oferta"`
+	IDJogadorDesejado   string `json:"id_jogador_desejado"`
+	NomeJogadorDesejado string `json:"nome_jogador_desejado"`
+	IDCartaOferecida    string `json:"id_carta_oferecida"`
+	IDCartaDesejada     string `json:"id_carta_desejada"`
 }
 
 type TrocarCartasResp struct {
