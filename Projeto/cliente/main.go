@@ -19,6 +19,8 @@ var (
 	meuID         string
 	mqttClient    mqtt.Client
 	salaAtual     string
+	oponenteID    string
+	oponenteNome  string
 	meuInventario []protocolo.Carta
 )
 
@@ -202,19 +204,17 @@ func processarMensagemServidor(msg protocolo.Mensagem) {
 		var dados protocolo.DadosPartidaEncontrada
 		json.Unmarshal(msg.Dados, &dados)
 		salaAtual = dados.SalaID
+		oponenteID = dados.OponenteID
+		oponenteNome = dados.OponenteNome
 
-		fmt.Printf("\n╔═══════════════════════════════════════╗\n")
-		fmt.Printf("║   PARTIDA ENCONTRADA!                 ║\n")
-		fmt.Printf("║   Oponente: %-25s ║\n", dados.OponenteNome)
-		fmt.Printf("║   Sala: %-29s ║\n", dados.SalaID[:12]+"...")
-		fmt.Printf("╚═══════════════════════════════════════╝\n")
-		fmt.Println("\n[INFO] Use /comprar para adquirir um pacote de cartas e iniciar o jogo.")
-		fmt.Print("> ")
+		fmt.Printf("\n[PARTIDA] Partida encontrada contra '%s'!\n", oponenteNome)
+		fmt.Println("Use /comprar para adquirir seu pacote inicial de cartas.")
 
 		// Subscreve aos eventos da partida
 		topicoPartida := fmt.Sprintf("partidas/%s/eventos", salaAtual)
-		token := mqttClient.Subscribe(topicoPartida, 0, handleEventoPartida)
-		token.Wait()
+		if token := mqttClient.Subscribe(topicoPartida, 0, handleEventoPartida); token.Wait() && token.Error() != nil {
+			log.Printf("Erro ao se inscrever no tópico da partida: %v", token.Error())
+		}
 
 	case "PACOTE_RESULTADO":
 		var dados protocolo.ComprarPacoteResp
