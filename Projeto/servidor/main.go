@@ -307,10 +307,11 @@ func (s *Servidor) handleComandoPartida(client mqtt.Client, msg mqtt.Message) {
 
 		s.broadcastChat(sala, texto, nomeRemetente)
 
-	case "TROCAR_CARTAS":
+	case "TROCAR_CARTAS_OFERTA":
 		var req protocolo.TrocarCartasReq
-		json.Unmarshal(mensagem.Dados, &req)
-		s.processarTrocaCartas(sala, &req)
+		if err := json.Unmarshal(mensagem.Dados, &req); err == nil {
+			s.processarTrocaCartas(sala, &req)
+		}
 	}
 }
 
@@ -1653,112 +1654,123 @@ func (s *Servidor) broadcastChat(sala *Sala, texto, remetente string) {
 	s.publicarEventoPartida(sala.ID, msg)
 }
 
-// processarTrocaCartas processa solicitação de troca de cartas entre jogadores
+// ==================== LÓGICA DE TROCA DE CARTAS ====================
+
 func (s *Servidor) processarTrocaCartas(sala *Sala, req *protocolo.TrocarCartasReq) {
-	log.Printf("[TROCA] Solicitação de troca: %s oferece %s por %s de %s", 
-		req.IDJogadorOferta, req.IDCartaOferecida, req.IDCartaDesejada, req.IDJogadorDesejado)
+	log.Printf("[TROCA] Proposta recebida na sala %s", sala.ID)
 
-	s.mutexClientes.RLock()
-	jogadorOferta, existeOferta := s.Clientes[req.IDJogadorOferta]
-	jogadorDesejado, existeDesejado := s.Clientes[req.IDJogadorDesejado]
-	s.mutexClientes.RUnlock()
-
-	if !existeOferta || !existeDesejado {
-		resposta := protocolo.Mensagem{
-			Comando: "TROCAR_CARTAS_RESPOSTA",
-			Dados: mustJSON(protocolo.TrocarCartasResp{
-				Sucesso:  false,
-				Mensagem: "Jogador não encontrado",
-			}),
-		}
-		s.publicarParaCliente(req.IDJogadorOferta, resposta)
+	// Apenas o Host coordena a troca
+	if sala.ServidorHost != s.MeuEndereco {
+		// Lógica para encaminhar ao Host seria aqui, se necessário.
 		return
 	}
 
-	// Verifica se ambos têm as cartas
-	jogadorOferta.mutex.Lock()
-	indicCartaOferta := -1
-	var cartaOferta Carta
-	for i, carta := range jogadorOferta.Inventario {
-		if carta.ID == req.IDCartaOferecida {
-			indicCartaOferta = i
-			cartaOferta = carta
-			break
-		}
-	}
-	jogadorOferta.mutex.Unlock()
+	jogadorOferta := s.getClienteDaSala(sala, req.IDJogadorOferta)
+	jogadorDesejado := s.getClienteDaSala(sala, req.IDJogadorDesejado)
 
-	if indicCartaOferta == -1 {
-		resposta := protocolo.Mensagem{
-			Comando: "TROCAR_CARTAS_RESPOSTA",
-			Dados: mustJSON(protocolo.TrocarCartasResp{
-				Sucesso:  false,
-				Mensagem: "Carta oferecida não encontrada no seu inventário",
-			}),
-		}
-		s.publicarParaCliente(req.IDJogadorOferta, resposta)
+	if jogadorOferta == nil || jogadorDesejado == nil {
+		s.notificarErro(req.IDJogadorOferta, "Um dos jogadores da troca não foi encontrado.")
 		return
 	}
 
-	jogadorDesejado.mutex.Lock()
-	indicCartaDesejada := -1
-	var cartaDesejada Carta
-	for i, carta := range jogadorDesejado.Inventario {
-		if carta.ID == req.IDCartaDesejada {
-			indicCartaDesejada = i
-			cartaDesejada = carta
-			break
-		}
-	}
-	jogadorDesejado.mutex.Unlock()
+	cartaOferta, idxOferta := s.findCartaNoInventario(jogadorOferta, req.IDCartaOferecida)
+	cartaDesejada, idxDesejado := s.findCartaNoInventario(jogadorDesejado, req.IDCartaDesejada)
 
-	if indicCartaDesejada == -1 {
-		resposta := protocolo.Mensagem{
-			Comando: "TROCAR_CARTAS_RESPOSTA",
-			Dados: mustJSON(protocolo.TrocarCartasResp{
-				Sucesso:  false,
-				Mensagem: "Carta desejada não encontrada no inventário do oponente",
-			}),
-		}
-		s.publicarParaCliente(req.IDJogadorOferta, resposta)
+	if idxOferta == -1 {
+		s.notificarErro(req.IDJogadorOferta, fmt.Sprintf("Você não tem a carta %s.", cartaOferta.Nome))
+		return
+	}
+	if idxDesejado == -1 {
+		s.notificarErro(req.IDJogadorOferta, fmt.Sprintf("%s não tem a carta %s.", jogadorDesejado.Nome, cartaDesejada.Nome))
 		return
 	}
 
-	// Realiza a troca
+	// Executa a troca
 	jogadorOferta.mutex.Lock()
 	jogadorDesejado.mutex.Lock()
-
-	// Remove cartas dos inventários originais
-	jogadorOferta.Inventario = append(jogadorOferta.Inventario[:indicCartaOferta], jogadorOferta.Inventario[indicCartaOferta+1:]...)
-	jogadorDesejado.Inventario = append(jogadorDesejado.Inventario[:indicCartaDesejada], jogadorDesejado.Inventario[indicCartaDesejada+1:]...)
-
-	// Adiciona cartas aos novos inventários
-	jogadorOferta.Inventario = append(jogadorOferta.Inventario, cartaDesejada)
-	jogadorDesejado.Inventario = append(jogadorDesejado.Inventario, cartaOferta)
-
+	jogadorOferta.Inventario[idxOferta], jogadorDesejado.Inventario[idxDesejado] = jogadorDesejado.Inventario[idxDesejado], jogadorOferta.Inventario[idxOferta]
 	jogadorDesejado.mutex.Unlock()
 	jogadorOferta.mutex.Unlock()
 
-	log.Printf("[TROCA] Troca realizada com sucesso: %s <-> %s", cartaOferta.Nome, cartaDesejada.Nome)
+	log.Printf("[TROCA] Troca realizada com sucesso entre %s e %s.", jogadorOferta.Nome, jogadorDesejado.Nome)
 
 	// Notifica ambos os jogadores
-	respostaOferta := protocolo.Mensagem{
-		Comando: "TROCAR_CARTAS_RESPOSTA",
-		Dados: mustJSON(protocolo.TrocarCartasResp{
-			Sucesso:  true,
-			Mensagem: fmt.Sprintf("Troca realizada! Você trocou %s por %s", cartaOferta.Nome, cartaDesejada.Nome),
-		}),
+	s.notificarSucessoTroca(jogadorOferta.ID, cartaOferta.Nome, cartaDesejada.Nome)
+	s.notificarSucessoTroca(jogadorDesejado.ID, cartaDesejada.Nome, cartaOferta.Nome)
+	
+	// Sincroniza estado com a Sombra
+	if sala.ServidorSombra != "" {
+		estado := s.criarEstadoDaSala(sala)
+		go s.sincronizarEstadoComSombra(sala.ServidorSombra, estado)
 	}
-	s.publicarParaCliente(req.IDJogadorOferta, respostaOferta)
+}
 
-	respostaDesejado := protocolo.Mensagem{
-		Comando: "TROCAR_CARTAS_RESPOSTA",
-		Dados: mustJSON(protocolo.TrocarCartasResp{
-			Sucesso:  true,
-			Mensagem: fmt.Sprintf("Troca realizada! Você trocou %s por %s", cartaDesejada.Nome, cartaOferta.Nome),
-		}),
+func (s *Servidor) getClienteDaSala(sala *Sala, clienteID string) *Cliente {
+	sala.mutex.Lock()
+	defer sala.mutex.Unlock()
+	for _, jogador := range sala.Jogadores {
+		if jogador.ID == clienteID {
+			return jogador
+		}
 	}
-	s.publicarParaCliente(req.IDJogadorDesejado, respostaDesejado)
+	return nil
+}
+
+func (s *Servidor) findCartaNoInventario(cliente *Cliente, cartaID string) (Carta, int) {
+	cliente.mutex.Lock()
+	defer cliente.mutex.Unlock()
+	for i, c := range cliente.Inventario {
+		if c.ID == cartaID {
+			return c, i
+		}
+	}
+	return Carta{}, -1
+}
+
+func (s *Servidor) notificarErro(clienteID string, mensagem string) {
+	s.publicarParaCliente(clienteID, protocolo.Mensagem{
+		Comando: "ERRO",
+		Dados:   mustJSON(protocolo.DadosErro{Mensagem: mensagem}),
+	})
+}
+
+func (s *Servidor) notificarSucessoTroca(clienteID, cartaPerdida, cartaGanha string) {
+	msg := fmt.Sprintf("Troca realizada! Você deu '%s' e recebeu '%s'.", cartaPerdida, cartaGanha)
+	resp := protocolo.TrocarCartasResp{Sucesso: true, Mensagem: msg}
+	s.publicarParaCliente(clienteID, protocolo.Mensagem{Comando: "TROCA_CONCLUIDA", Dados: mustJSON(resp)})
+}
+
+func (s *Servidor) notificarJogadorRemoto(servidor string, clienteID string, msg protocolo.Mensagem) {
+	log.Printf("[NOTIFICACAO-REMOTA] Notificando cliente %s no servidor %s", clienteID, servidor)
+	reqBody, _ := json.Marshal(map[string]interface{}{
+		"cliente_id": clienteID,
+		"mensagem":   msg,
+	})
+	httpClient := &http.Client{Timeout: 3 * time.Second}
+	httpClient.Post(fmt.Sprintf("http://%s/partida/notificar_jogador", servidor), "application/json", bytes.NewBuffer(reqBody))
+}
+
+func (s *Servidor) getClienteLocal(clienteID string) *Cliente {
+	s.mutexClientes.RLock()
+	defer s.mutexClientes.RUnlock()
+	// Esta função é um placeholder, a lógica real está em encontrar o cliente na sala.
+	// Uma implementação melhor verificaria se o cliente está conectado a este broker.
+	_, ok := s.Clientes[clienteID]
+	if ok {
+		return s.Clientes[clienteID]
+	}
+	return nil
+}
+
+func (s *Servidor) criarEstadoDaSala(sala *Sala) *EstadoPartida {
+	sala.mutex.Lock()
+	defer sala.mutex.Unlock()
+
+	// Simplificado para apenas o necessário
+	return &EstadoPartida{
+		SalaID: sala.ID,
+		Estado: sala.Estado,
+	}
 }
 
 // ==================== UTILITÁRIOS ====================
@@ -1767,3 +1779,4 @@ func mustJSON(v interface{}) []byte {
 	b, _ := json.Marshal(v)
 	return b
 }
+
