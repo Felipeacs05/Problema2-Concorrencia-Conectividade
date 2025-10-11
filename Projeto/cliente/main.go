@@ -354,9 +354,10 @@ func processarComando(entrada string) {
 	case "/sair":
 		fmt.Println("Saindo...")
 		os.Exit(0)
-
+	case "/trocar":
+		iniciarProcessoDeTroca()
 	default:
-		// Trata como mensagem de chat
+		// Se não for um comando, envia como chat
 		if salaAtual != "" {
 			enviarChat(entrada)
 		} else {
@@ -465,18 +466,63 @@ func mostrarCartas() {
 }
 
 func mostrarAjuda() {
-	fmt.Println("\n╔═══════════════════════════════════════════════════════════╗")
-	fmt.Println("║                    COMANDOS DISPONÍVEIS                   ║")
-	fmt.Println("╠═══════════════════════════════════════════════════════════╣")
-	fmt.Println("║ /comprar             - Compra um pacote de 5 cartas       ║")
-	fmt.Println("║ /jogar <ID>          - Joga uma carta (use o ID da carta) ║")
-	fmt.Println("║ /cartas              - Mostra suas cartas na mão          ║")
-	fmt.Println("║ /ajuda               - Mostra esta ajuda                  ║")
-	fmt.Println("║ /sair                - Sai do jogo                        ║")
-	fmt.Println("║                                                           ║")
-	fmt.Println("║ Qualquer outro texto será enviado como chat              ║")
-	fmt.Println("╚═══════════════════════════════════════════════════════════╝")
-	fmt.Println()
+	fmt.Println("\nComandos disponíveis:")
+	fmt.Println("  /cartas                - Mostra suas cartas")
+	fmt.Println("  /comprar               - Compra um novo pacote de cartas")
+	fmt.Println("  /jogar <ID_da_carta>   - Joga uma carta da sua mão")
+	fmt.Println("  /trocar                - Propõe uma troca de cartas com o oponente")
+	fmt.Println("  /ajuda                 - Mostra esta lista de comandos")
+	fmt.Println("  /sair                  - Sai do jogo")
+	fmt.Println("  Qualquer outro texto será enviado como chat.")
+}
+
+func iniciarProcessoDeTroca() {
+	if salaAtual == "" {
+		fmt.Println("Você precisa estar em uma partida para trocar cartas.")
+		return
+	}
+	if oponenteID == "" || oponenteNome == "" {
+		fmt.Println("Não foi possível identificar seu oponente para a troca.")
+		return
+	}
+
+	scanner := bufio.NewScanner(os.Stdin)
+
+	fmt.Println("\n--- Propor Troca de Cartas ---")
+	mostrarCartas()
+
+	fmt.Print("Digite o ID da carta que você quer OFERECER: ")
+	scanner.Scan()
+	cartaOferecidaID := strings.TrimSpace(scanner.Text())
+
+	fmt.Print("Digite o ID da carta do oponente que você quer RECEBER: ")
+	scanner.Scan()
+	cartaDesejadaID := strings.TrimSpace(scanner.Text())
+
+	if cartaOferecidaID == "" || cartaDesejadaID == "" {
+		fmt.Println("IDs das cartas não podem ser vazios. Abortando troca.")
+		return
+	}
+
+	fmt.Printf("Enviando proposta de troca para %s...\n", oponenteNome)
+
+	req := protocolo.TrocarCartasReq{
+		IDJogadorOferta:     meuID,
+		NomeJogadorOferta:   meuNome,
+		IDJogadorDesejado:   oponenteID,
+		NomeJogadorDesejado: oponenteNome,
+		IDCartaOferecida:    cartaOferecidaID,
+		IDCartaDesejada:     cartaDesejadaID,
+	}
+
+	msg := protocolo.Mensagem{
+		Comando: "TROCAR_CARTAS_OFERTA",
+		Dados:   mustJSON(req),
+	}
+
+	payload, _ := json.Marshal(msg)
+	topico := fmt.Sprintf("partidas/%s/comandos", salaAtual)
+	mqttClient.Publish(topico, 0, false, payload)
 }
 
 func mustJSON(v interface{}) []byte {
