@@ -1,0 +1,43 @@
+# Git
+.git
+.gitignore
+
+# Documentação
+*.md
+!README.md
+
+# Testes
+*_test.go
+*.test
+coverage.out
+
+# Binários
+bin/
+*.exe
+servidor
+cliente
+
+# Dependências (será baixado no build)
+vendor/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+
+# Temporários
+tmp/
+temp/
+*.log
+
+# Scripts
+scripts/
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# Dados locais
+mosquitto/data/*
+mosquitto/log/*
+
