@@ -106,7 +106,7 @@ docker-compose down
 docker-compose down -v
 ```
 
-## Teste Rápido de Falha
+## Testes de Funcionalidades
 
 ### Teste 1: Falha do Líder
 
@@ -126,17 +126,45 @@ curl http://localhost:8081/estoque/status | jq '.lider'
 docker-compose start servidor1
 ```
 
-### Teste 2: Falha de Broker
+### Teste 2: Failover de Host (Partida)
 
 ```bash
-# 1. Pare um broker
-docker-compose stop broker2
+# 1. Inicie uma partida entre dois jogadores
+# 2. Durante a partida, identifique o servidor Host (via logs)
+# 3. Pare o servidor Host: docker-compose stop servidor1
+# 4. Observe nos logs a promoção automática da Sombra
+# 5. A partida continua normalmente no servidor Sombra
+```
 
-# 2. Clientes conectados ao broker2 perdem conexão
-# 3. Outros clientes continuam funcionando
+### Teste 3: Failover de Broker
 
-# 4. Reinicie o broker
-docker-compose start broker2
+```bash
+# 1. Conecte um cliente ao broker1
+# 2. Pare o broker: docker-compose stop broker1
+# 3. Cliente reconecta automaticamente a broker2 ou broker3
+# 4. Reinicie o broker: docker-compose start broker1
+```
+
+### Teste 4: Matchmaking Global
+
+```bash
+# 1. Cliente 1 conecta ao Servidor 1: docker-compose run --rm cliente
+#    Escolha opção 1
+# 2. Cliente 2 conecta ao Servidor 2 (em outro terminal): docker-compose run --rm cliente
+#    Escolha opção 2
+# 3. Ambos entram na fila
+# 4. Sistema automaticamente pareia jogadores de servidores diferentes
+# 5. Observe nos logs a comunicação entre servidores
+```
+
+### Teste 5: Testes Unitários
+
+```bash
+# Executa todos os testes
+make test-unit
+
+# Executa benchmarks
+make test-bench
 ```
 
 ## Solução de Problemas
