@@ -389,70 +389,87 @@ Funcionamento:
 Impacto: Localizado aos clientes desse servidor
 ```
 
-#### ⚠️ Falha do Host de Partida
+#### ✅ Falha do Host de Partida
 ```
-Status: PARCIALMENTE IMPLEMENTADO
+Status: IMPLEMENTADO
 
 Implementado:
 - Sincronização de estado com Sombra
 - Sombra mantém cópia do estado da partida
-
-NÃO Implementado (futuro):
-- Detecção automática de falha do Host
+- Detecção automática de falha do Host (timeout HTTP)
 - Promoção automática da Sombra a Host
 - Continuação da partida com novo Host
+- Notificação dos jogadores sobre a promoção
 
-Estado Atual: Partida é interrompida se Host falhar
+Estado Atual: Partida continua automaticamente após falha do Host
 ```
 
-#### ⚠️ Falha de Broker MQTT
+#### ✅ Falha de Broker MQTT
 ```
-Status: PARCIALMENTE IMPLEMENTADO
+Status: IMPLEMENTADO
 
 Implementado:
 - Auto-reconexão do cliente MQTT (biblioteca Paho)
 - Outros servidores/brokers continuam funcionando
+- Failover automático de clientes para brokers alternativos
+- Re-inscrição automática em tópicos após reconexão
+- Retry exponencial com backoff
 
-NÃO Implementado (futuro):
-- Failover automático de clientes para outro broker
-- Migração de partidas ativas
-
-Estado Atual: Clientes ficam desconectados até broker voltar
+Estado Atual: Clientes tentam reconectar automaticamente a brokers alternativos
 ```
 
 ---
 
-### 8. Testes ⚠️ PARCIAL
+### 8. Testes ✅ IMPLEMENTADO
 
 **Requisito**: Deverá ser desenvolvido um teste de software para verificar a validade da solução.
 
 **Implementação**:
 
-#### ✅ Testes Manuais Possíveis
+#### ✅ Testes Unitários Automatizados
+```bash
+# Executar testes
+cd servidor && go test -v
+
+# Testes com cobertura
+go test -v -cover
+
+# Benchmarks
+go test -bench=. -benchmem
+```
+
+**Testes Implementados**:
+- TestCompararCartas: Verifica comparação de cartas por valor e naipe
+- TestSampleRaridade: Valida distribuição estatística de raridades
+- TestGerarCartaComum: Testa geração de cartas comuns
+- TestEstoqueInicial: Verifica inicialização do estoque
+- TestRetirarCartasDoEstoque: Testa retirada de cartas
+- BenchmarkCompararCartas: Benchmark de performance
+- BenchmarkSampleRaridade: Benchmark de amostragem
+
+#### ✅ Testes Manuais
 ```bash
 # Teste 1: Eleição de Líder
-make test-lider  # Para líder e verifica nova eleição
+make test-lider
 
-# Teste 2: Partida entre Servidores
+# Teste 2: Matchmaking Global
 # 1. Cliente 1 conecta ao Servidor 1
 # 2. Cliente 2 conecta ao Servidor 2
-# 3. Ambos entram na fila e são pareados
-# 4. Verificar logs de encaminhamento de comandos
+# 3. Ambos entram na fila e são pareados automaticamente
+# 4. Verificar logs de matchmaking global
 
-# Teste 3: Falha de Broker
+# Teste 3: Failover de Host
+# Durante uma partida, parar o servidor Host
+# Verificar promoção automática da Sombra
+
+# Teste 4: Failover de Broker
 docker-compose stop broker1
-# Clientes do Servidor 1 perdem conexão
-# Outros continuam funcionando
+# Clientes reconectam automaticamente a outros brokers
 ```
 
-#### ❌ Testes Automatizados (NÃO IMPLEMENTADOS)
-```
-Sugestões para implementação futura:
-- Testes unitários com Go testing
-- Testes de integração com docker-compose test
-- Testes de carga com múltiplos clientes simultâneos
-- Testes de falha com Chaos Engineering (toxiproxy)
-```
+#### ✅ Scripts de Teste
+- scripts/test.sh: Executa todos os testes automaticamente
+- scripts/build.sh: Compila e verifica o projeto
 
 ---
 
@@ -678,20 +695,20 @@ Primitivas de sincronização:
 
 ## Limitações Conhecidas
 
-### 1. Matchmaking Local
-- **Limitação**: Jogadores só são pareados dentro do mesmo servidor
-- **Impacto**: Não utiliza todo o potencial da arquitetura distribuída
-- **Melhoria Futura**: Matchmaking global com fila compartilhada
+### 1. ~~Matchmaking Local~~ ✅ RESOLVIDO
+- ~~**Limitação**: Jogadores só são pareados dentro do mesmo servidor~~
+- **Status**: Implementado matchmaking global entre servidores
+- **Funcionalidade**: Jogadores de servidores diferentes são automaticamente pareados
 
-### 2. Promoção da Sombra
-- **Limitação**: Sombra não se promove automaticamente se Host falhar
-- **Impacto**: Partida é interrompida em caso de falha do Host
-- **Melhoria Futura**: Detecção de falha + promoção automática
+### 2. ~~Promoção da Sombra~~ ✅ RESOLVIDO
+- ~~**Limitação**: Sombra não se promove automaticamente se Host falhar~~
+- **Status**: Implementado detecção e promoção automática
+- **Funcionalidade**: Partida continua automaticamente após falha do Host
 
-### 3. Failover de Broker
-- **Limitação**: Clientes não migram automaticamente para outro broker
-- **Impacto**: Desconexão total se broker falhar
-- **Melhoria Futura**: Lista de brokers alternativos no cliente
+### 3. ~~Failover de Broker~~ ✅ RESOLVIDO
+- ~~**Limitação**: Clientes não migram automaticamente para outro broker~~
+- **Status**: Implementado failover automático de brokers
+- **Funcionalidade**: Clientes tentam reconectar a brokers alternativos automaticamente
 
 ### 4. Persistência
 - **Limitação**: Estado não é persistido em disco
