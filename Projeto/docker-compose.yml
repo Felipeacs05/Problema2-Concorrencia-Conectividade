@@ -1,0 +1,177 @@
+version: '3.8'
+
+services:
+  # ==================== BROKERS MQTT ====================
+  
+  # Broker 1 - Associado ao Servidor 1
+  broker1:
+    image: eclipse-mosquitto:2.0
+    container_name: broker1
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - broker1_data:/mosquitto/data
+      - broker1_log:/mosquitto/log
+    networks:
+      - game_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-t", "test", "-E", "-i", "healthcheck", "-W", "3"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Broker 2 - Associado ao Servidor 2
+  broker2:
+    image: eclipse-mosquitto:2.0
+    container_name: broker2
+    ports:
+      - "1884:1883"
+      - "9002:9001"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - broker2_data:/mosquitto/data
+      - broker2_log:/mosquitto/log
+    networks:
+      - game_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-t", "test", "-E", "-i", "healthcheck", "-W", "3"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Broker 3 - Associado ao Servidor 3
+  broker3:
+    image: eclipse-mosquitto:2.0
+    container_name: broker3
+    ports:
+      - "1885:1883"
+      - "9003:9001"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - broker3_data:/mosquitto/data
+      - broker3_log:/mosquitto/log
+    networks:
+      - game_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-t", "test", "-E", "-i", "healthcheck", "-W", "3"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ==================== SERVIDORES DE JOGO ====================
+  
+  # Servidor 1
+  servidor1:
+    build:
+      context: .
+      dockerfile: servidor/Dockerfile
+    container_name: servidor1
+    command: ["-addr", "servidor1:8080", "-broker", "tcp://broker1:1883"]
+    ports:
+      - "8080:8080"
+    depends_on:
+      broker1:
+        condition: service_healthy
+    networks:
+      - game_network
+    restart: unless-stopped
+    environment:
+      - GO_ENV=production
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/servers"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Servidor 2
+  servidor2:
+    build:
+      context: .
+      dockerfile: servidor/Dockerfile
+    container_name: servidor2
+    command: ["-addr", "servidor2:8080", "-broker", "tcp://broker2:1883"]
+    ports:
+      - "8081:8080"
+    depends_on:
+      broker2:
+        condition: service_healthy
+      servidor1:
+        condition: service_healthy
+    networks:
+      - game_network
+    restart: unless-stopped
+    environment:
+      - GO_ENV=production
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/servers"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Servidor 3
+  servidor3:
+    build:
+      context: .
+      dockerfile: servidor/Dockerfile
+    container_name: servidor3
+    command: ["-addr", "servidor3:8080", "-broker", "tcp://broker3:1883"]
+    ports:
+      - "8082:8080"
+    depends_on:
+      broker3:
+        condition: service_healthy
+      servidor1:
+        condition: service_healthy
+    networks:
+      - game_network
+    restart: unless-stopped
+    environment:
+      - GO_ENV=production
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/servers"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ==================== CLIENTES (OPCIONAL PARA TESTES) ====================
+  
+  # Cliente de exemplo - pode ser executado manualmente
+  # Para executar: docker-compose run --rm cliente
+  cliente:
+    build:
+      context: .
+      dockerfile: cliente/Dockerfile
+    container_name: cliente_interativo
+    stdin_open: true
+    tty: true
+    depends_on:
+      - servidor1
+      - servidor2
+      - servidor3
+    networks:
+      - game_network
+    profiles:
+      - cliente  # Use: docker-compose --profile cliente up
+
+# ==================== VOLUMES ====================
+volumes:
+  broker1_data:
+  broker1_log:
+  broker2_data:
+  broker2_log:
+  broker3_data:
+  broker3_log:
+
+# ==================== NETWORK ====================
+networks:
+  game_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16
+
