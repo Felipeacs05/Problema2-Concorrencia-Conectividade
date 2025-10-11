@@ -533,9 +533,12 @@ Métricas sugeridas:
 | Host e Sombra | ✅ | Com sincronização |
 | Estoque distribuído | ✅ | Gerenciado pelo líder |
 | Fluxo de jogada remota | ✅ | Encaminhamento implementado |
-| Tolerância a falhas | ⚠️ | Parcial - eleição de líder OK |
-| Recuperação de partidas | ❌ | Futuro - promoção da Sombra |
-| Matchmaking entre servidores | ❌ | Futuro - apenas local |
+| Tolerância a falhas | ✅ | Eleição de líder + Failover |
+| Recuperação de partidas | ✅ | Promoção automática da Sombra |
+| Matchmaking entre servidores | ✅ | Matchmaking global implementado |
+| Failover de broker MQTT | ✅ | Reconexão automática |
+| Troca de cartas | ✅ | Sistema completo |
+| Testes unitários | ✅ | Com benchmarks |
 
 **Legenda**: ✅ Completo | ⚠️ Parcial | ❌ Não implementado
 
