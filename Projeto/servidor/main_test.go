@@ -56,3 +56,55 @@ func TestSampleRaridade(t *testing.T) {
 		}
 	}
 }
+
+// TestGerarCartaComum verifica se as cartas comuns são geradas com os atributos corretos.
+func TestGerarCartaComum(t *testing.T) {
+	s := &Servidor{} // Instância vazia para chamar o método
+	carta := s.gerarCartaComum()
+
+	if carta.ID == "" || carta.Nome == "" || carta.Naipe == "" {
+		t.Error("Carta comum gerada com campos vazios.")
+	}
+	if carta.Raridade != "C" {
+		t.Errorf("Raridade incorreta. Esperado 'C', recebido '%s'", carta.Raridade)
+	}
+	if carta.Valor < 1 || carta.Valor > 50 {
+		t.Errorf("Valor da carta comum fora do intervalo [1, 50]. Recebido: %d", carta.Valor)
+	}
+}
+
+// TestInicializarEstoque garante que o estoque é populado com todas as raridades.
+func TestInicializarEstoque(t *testing.T) {
+	s := &Servidor{Estoque: make(map[string][]Carta)}
+	s.inicializarEstoque()
+
+	if len(s.Estoque["C"]) == 0 {
+		t.Error("Estoque de cartas comuns não foi inicializado.")
+	}
+	if len(s.Estoque["U"]) == 0 {
+		t.Error("Estoque de cartas incomuns não foi inicializado.")
+	}
+	if len(s.Estoque["R"]) == 0 {
+		t.Error("Estoque de cartas raras não foi inicializado.")
+	}
+	if len(s.Estoque["L"]) == 0 {
+		t.Error("Estoque de cartas lendárias não foi inicializado.")
+	}
+}
+
+// TestRetirarCartasDoEstoque verifica a lógica de retirada e o decremento do estoque.
+func TestRetirarCartasDoEstoque(t *testing.T) {
+	s := &Servidor{Estoque: make(map[string][]Carta)}
+	s.inicializarEstoque()
+
+	totalAntes := s.contarEstoque()
+	cartasRetiradas := s.retirarCartasDoEstoque(5)
+	totalDepois := s.contarEstoque()
+
+	if len(cartasRetiradas) != 5 {
+		t.Errorf("Número incorreto de cartas retiradas. Esperado 5, recebido %d", len(cartasRetiradas))
+	}
+	if totalDepois != totalAntes-5 {
+		t.Errorf("Estoque não foi decrementado corretamente. Antes: %d, Depois: %d", totalAntes, totalDepois)
+	}
+}
