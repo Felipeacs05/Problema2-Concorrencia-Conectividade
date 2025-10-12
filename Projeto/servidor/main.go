@@ -364,13 +364,13 @@ func (s *Servidor) iniciarAPI() {
 // Handlers de descoberta
 func (s *Servidor) handleRegister(c *gin.Context) {
 	var novoServidor InfoServidor
-		if err := c.ShouldBindJSON(&novoServidor); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
+	if err := c.ShouldBindJSON(&novoServidor); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
 	s.mutexServidores.Lock()
-		novoServidor.UltimoPing = time.Now()
+	novoServidor.UltimoPing = time.Now()
 	novoServidor.Ativo = true
 	s.Servidores[novoServidor.Endereco] = &novoServidor
 	s.mutexServidores.Unlock()
@@ -430,9 +430,9 @@ func (s *Servidor) handleGetServers(c *gin.Context) {
 func (s *Servidor) handleSolicitarVoto(c *gin.Context) {
 	var dados map[string]interface{}
 	if err := c.ShouldBindJSON(&dados); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
 	candidato := dados["candidato"].(string)
 	termo := int64(dados["termo"].(float64))
@@ -445,7 +445,7 @@ func (s *Servidor) handleSolicitarVoto(c *gin.Context) {
 		s.TermoAtual = termo
 		log.Printf("Votando em %s para termo %d", candidato, termo)
 		c.JSON(http.StatusOK, gin.H{"voto_concedido": true, "termo": s.TermoAtual})
-		} else {
+	} else {
 		c.JSON(http.StatusOK, gin.H{"voto_concedido": false, "termo": s.TermoAtual})
 	}
 }
@@ -470,7 +470,7 @@ func (s *Servidor) handleDeclararLider(c *gin.Context) {
 	}
 	s.mutexLider.Unlock()
 
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
 // Handlers de estoque
@@ -646,7 +646,7 @@ func (s *Servidor) handleSolicitarOponente(c *gin.Context) {
 			PontosPartida:  make(map[string]int),
 			NumeroRodada:   1,
 			Prontos:        make(map[string]bool),
-			ServidorHost:   s.MeuEndereco,    // Eu sou o Host
+			ServidorHost:   s.MeuEndereco,      // Eu sou o Host
 			ServidorSombra: req.ServidorOrigem, // O outro servidor é a Sombra
 		}
 
@@ -787,15 +787,15 @@ func (s *Servidor) iniciarEleicao() {
 			url := fmt.Sprintf("http://%s/eleicao/solicitar_voto", addr)
 
 			resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
+			if err != nil {
+				return
+			}
+			defer resp.Body.Close()
 
 			var resultado map[string]interface{}
 			if err := json.NewDecoder(resp.Body).Decode(&resultado); err != nil {
-			return
-		}
+				return
+			}
 
 			if votoConcedido, ok := resultado["voto_concedido"].(bool); ok && votoConcedido {
 				mutexVotos.Lock()
@@ -1697,7 +1697,7 @@ func (s *Servidor) processarTrocaCartas(sala *Sala, req *protocolo.TrocarCartasR
 	// Notifica ambos os jogadores
 	s.notificarSucessoTroca(jogadorOferta.ID, cartaOferta.Nome, cartaDesejada.Nome)
 	s.notificarSucessoTroca(jogadorDesejado.ID, cartaDesejada.Nome, cartaOferta.Nome)
-	
+
 	// Sincroniza estado com a Sombra
 	if sala.ServidorSombra != "" {
 		estado := s.criarEstadoDaSala(sala)
@@ -1779,4 +1779,3 @@ func mustJSON(v interface{}) []byte {
 	b, _ := json.Marshal(v)
 	return b
 }
-
