@@ -36,7 +36,7 @@ cd cliente
 go run main.go
 
 # Terminal 2 - Cliente 2
-cd cliente  
+cd cliente
 go run main.go
 ```
 
