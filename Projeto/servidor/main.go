@@ -1346,26 +1346,18 @@ func (s *Servidor) encaminharJogadaParaHost(sala *Sala, clienteID, cartaID strin
 
 	resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
-		log.Printf("Erro ao encaminhar jogada para Host: %v. Tentando promover Sombra...", err)
-		// Host falhou - promover Sombra a Host
+		log.Printf("[FAILOVER] Erro ao encaminhar jogada para Host %s: %v. Promovendo Sombra...", host, err)
 		s.promoverSombraAHost(sala)
-		// Reprocessar jogada como novo Host
+		// Após a promoção, este servidor é o novo Host, então ele processa a jogada diretamente.
 		s.processarJogadaComoHost(sala, clienteID, cartaID)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("Host retornou status %d ao processar jogada. Tentando promover Sombra...", resp.StatusCode)
+		log.Printf("[FAILOVER] Host %s retornou status %d. Promovendo Sombra...", host, resp.StatusCode)
 		s.promoverSombraAHost(sala)
 		s.processarJogadaComoHost(sala, clienteID, cartaID)
-		return
-	}
-
-	// Lê o estado atualizado retornado pelo Host
-	var resultado map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&resultado); err != nil {
-		log.Printf("Erro ao decodificar resposta do Host: %v", err)
 		return
 	}
 
@@ -1377,25 +1369,25 @@ func (s *Servidor) promoverSombraAHost(sala *Sala) {
 	sala.mutex.Lock()
 	defer sala.mutex.Unlock()
 
+	// Garante que a promoção só ocorra uma vez
+	if sala.ServidorHost == s.MeuEndereco {
+		return
+	}
+
 	antigoHost := sala.ServidorHost
 	sala.ServidorHost = s.MeuEndereco
-	sala.ServidorSombra = "" // Sem sombra por enquanto
+	sala.ServidorSombra = "" // Este é o novo Host, não há Sombra por enquanto.
 
-	log.Printf("[FAILOVER] Sombra %s promovida a Host. Antigo Host: %s", s.MeuEndereco, antigoHost)
+	log.Printf("[FAILOVER] Sombra %s promovida a Host para a sala %s. Antigo Host: %s", s.MeuEndereco, sala.ID, antigoHost)
 
 	// Notifica jogadores da promoção
 	msg := protocolo.Mensagem{
 		Comando: "ATUALIZACAO_JOGO",
 		Dados: mustJSON(protocolo.DadosAtualizacaoJogo{
-			MensagemDoTurno: "Servidor principal falhou. Continuando partida em servidor backup...",
-			NumeroRodada:    sala.NumeroRodada,
+			MensagemDoTurno: "Servidor principal da partida falhou. Continuando em um servidor reserva...",
 		}),
 	}
-
-	// Publica no broker local
-	payload, _ := json.Marshal(msg)
-	topico := fmt.Sprintf("partidas/%s/eventos", sala.ID)
-	s.MQTTClient.Publish(topico, 0, false, payload)
+	s.publicarEventoPartida(sala.ID, msg)
 }
 
 // processarJogadaComoHost processa uma jogada quando este servidor é o Host
