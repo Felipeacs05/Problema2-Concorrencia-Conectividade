@@ -1,4 +1,4 @@
-# Dockerfile para o Servidor de Jogo Distribuído
+# Dockerfile para o Cliente de Jogo Distribuído
 FROM golang:1.25-alpine AS builder
 
 # Instala dependências de build
@@ -13,8 +13,8 @@ RUN go mod download
 # Copia código fonte
 COPY . .
 
-# Compila o servidor
-RUN go build -o /servidor ./servidor
+# Compila o cliente
+RUN go build -o /cliente ./cliente
 
 # Imagem final
 FROM alpine:latest
@@ -24,12 +24,9 @@ RUN apk --no-cache add ca-certificates
 WORKDIR /root/
 
 # Copia o binário compilado
-COPY --from=builder /servidor .
-
-# Expõe a porta da API REST
-EXPOSE 8080
+COPY --from=builder /cliente .
 
 # Define o comando de inicialização
-ENTRYPOINT ["./servidor"]
+ENTRYPOINT ["./cliente"]
 
 
