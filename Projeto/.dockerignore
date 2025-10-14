@@ -14,8 +14,8 @@ coverage.out
 # Binários
 bin/
 *.exe
-servidor
-cliente
+/bin/servidor
+/bin/cliente
 
 # Dependências (será baixado no build)
 vendor/
