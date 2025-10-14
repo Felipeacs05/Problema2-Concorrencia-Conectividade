@@ -8,6 +8,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -115,24 +116,13 @@ var (
 func main() {
 	flag.Parse()
 
-	log.Printf("Iniciando servidor em %s", *meuEndereco)
-	log.Printf("Broker MQTT: %s", *brokerMQTT)
+	log.Printf("Iniciando servidor em %s | Broker MQTT: %s", *meuEndereco, *brokerMQTT)
 
 	servidor := novoServidor(*meuEndereco, *brokerMQTT)
 
-	// Inicializa estoque local
-	servidor.inicializarEstoque()
-
-	// Conecta ao broker MQTT
-	if err := servidor.conectarMQTT(); err != nil {
-		log.Fatalf("Erro ao conectar ao MQTT: %v", err)
-	}
-
-	// Inicia API REST
+	// Inicia processos concorrentes
 	go servidor.iniciarAPI()
-
-	// Inicia processos de descoberta e eleição
-	go servidor.descobrirServidores()
+	go servidor.descobrirServidores() // Agora vai funcionar
 	go servidor.processoEleicao()
 	go servidor.enviarHeartbeats()
 
@@ -141,19 +131,27 @@ func main() {
 }
 
 func novoServidor(endereco, broker string) *Servidor {
-	return &Servidor{
+	s := &Servidor{
 		MeuEndereco:     endereco,
-		MeuEnderecoHTTP: "http://" + endereco,
 		BrokerMQTT:      broker,
 		Servidores:      make(map[string]*InfoServidor),
+		TermoAtual:      0,
 		Estoque:         make(map[string][]Carta),
 		Clientes:        make(map[string]*Cliente),
 		Salas:           make(map[string]*Sala),
-		FilaDeEspera:    make([]*Cliente, 0),
-		SouLider:        false,
-		TermoAtual:      0,
-		UltimoHeartbeat: time.Now(),
+		FilaDeEspera:    make(chan *Cliente, 100), // Fila com buffer
+		VotosRecebidos:  make(chan bool),
+		PararEleicao:    make(chan bool),
+		ComandosPartida: make(map[string]chan protocolo.Comando),
 	}
+
+	s.inicializarEstoque()
+
+	if err := s.conectarMQTT(); err != nil {
+		log.Fatalf("Erro fatal ao conectar ao MQTT: %v", err)
+	}
+
+	return s
 }
 
 // ==================== MQTT ====================
@@ -173,16 +171,8 @@ func (s *Servidor) conectarMQTT() error {
 
 	log.Println("Conectado ao broker MQTT")
 
-	// Subscreve aos tópicos de comandos de clientes
-	token := s.MQTTClient.Subscribe("clientes/+/login", 0, s.handleClienteLogin)
-	token.Wait()
-
-	token = s.MQTTClient.Subscribe("clientes/+/entrar_fila", 0, s.handleClienteEntrarFila)
-	token.Wait()
-
-	token = s.MQTTClient.Subscribe("partidas/+/comandos", 0, s.handleComandoPartida)
-	token.Wait()
-
+	// Subscreve a tópicos importantes
+	s.subscreverTopicos()
 	return nil
 }
 
@@ -475,33 +465,49 @@ func (s *Servidor) handleDeclararLider(c *gin.Context) {
 
 // Handlers de estoque
 func (s *Servidor) handleComprarPacote(c *gin.Context) {
-	var dados map[string]interface{}
-	if err := c.ShouldBindJSON(&dados); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	if !s.souLider() {
+		s.encaminharParaLider(c)
 		return
 	}
 
-	quantidade := int(dados["quantidade"].(float64))
-
-	// Verifica se é o líder
-	s.mutexLider.RLock()
-	souLider := s.SouLider
-	s.mutexLider.RUnlock()
-
-	if !souLider {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Apenas o líder pode gerenciar o estoque"})
+	var req struct {
+		ClienteID string `json:"cliente_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Requisição inválida"})
 		return
 	}
 
-	cartas := s.retirarCartasDoEstoque(quantidade * PACOTE_SIZE)
+	log.Printf("[ESTOQUE] Recebido pedido de compra do cliente %s", req.ClienteID)
 
-	c.JSON(http.StatusOK, protocolo.ComprarPacoteResp{
-		Cartas:          cartas,
-		EstoqueRestante: s.contarEstoque(),
-	})
+	s.mutexEstoque.Lock()
+	defer s.mutexEstoque.Unlock()
+
+	pacote, err := s.formarPacote()
+	if err != nil {
+		log.Printf("[ESTOQUE] FALHA na compra para %s: %v", req.ClienteID, err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Aqui, o pacote seria enviado ao cliente via MQTT
+	// e o inventário do cliente seria atualizado.
+	// Por simplicidade, vamos apenas logar.
+
+	s.notificarCompraSucesso(req.ClienteID, pacote)
+
+	log.Printf("[ESTOQUE] SUCESSO na compra para %s. Novo estoque: C=%d, U=%d, R=%d, L=%d",
+		req.ClienteID, len(s.Estoque["C"]), len(s.Estoque["U"]), len(s.Estoque["R"]), len(s.Estoque["L"]))
+
+	c.JSON(http.StatusOK, gin.H{"pacote": pacote})
 }
 
 func (s *Servidor) handleStatusEstoque(c *gin.Context) {
+	if !s.souLider() {
+		s.encaminharParaLider(c)
+		return
+	}
+
 	s.mutexEstoque.Lock()
 	defer s.mutexEstoque.Unlock()
 
@@ -892,12 +898,7 @@ func (s *Servidor) enviarHeartbeats() {
 // ==================== DESCOBERTA DE SERVIDORES ====================
 
 func (s *Servidor) descobrirServidores() {
-	// Se há peers iniciais, registra com eles
-	if *servidoresIniciais != "" {
-		// TODO: parsear lista de servidores e registrar
-	}
-
-	// Adiciona si mesmo à lista
+	// Adiciona a si mesmo à lista
 	s.mutexServidores.Lock()
 	s.Servidores[s.MeuEndereco] = &InfoServidor{
 		Endereco:   s.MeuEndereco,
@@ -905,6 +906,23 @@ func (s *Servidor) descobrirServidores() {
 		Ativo:      true,
 	}
 	s.mutexServidores.Unlock()
+
+	// Lê a variável de ambiente PEERS
+	peersStr := os.Getenv("PEERS")
+	if peersStr == "" {
+		log.Println("[Cluster] Nenhuma variável PEERS encontrada. Operando em modo standalone.")
+		return
+	}
+
+	peers := strings.Split(peersStr, ",")
+	log.Printf("[Cluster] Peers para descoberta: %v", peers)
+
+	for _, peerAddr := range peers {
+		if peerAddr != s.MeuEndereco {
+			// Tenta se registrar com cada peer em uma goroutine
+			go s.registrarComPeer(peerAddr)
+		}
+	}
 
 	// Verifica periodicamente servidores inativos
 	ticker := time.NewTicker(10 * time.Second)
@@ -920,6 +938,61 @@ func (s *Servidor) descobrirServidores() {
 		}
 		s.mutexServidores.Unlock()
 	}
+}
+
+// registrarComPeer tenta se registrar com um peer até ter sucesso.
+func (s *Servidor) registrarComPeer(peerAddr string) {
+	ticker := time.NewTicker(5 * time.Second) // Tenta a cada 5 segundos
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			log.Printf("[Cluster] Tentando registrar com o peer %s...", peerAddr)
+			if s.enviarRegistro(peerAddr) {
+				log.Printf("[Cluster] Registro com %s bem-sucedido!", peerAddr)
+				return // Sucesso, para de tentar
+			}
+			log.Printf("[Cluster] Falha ao registrar com %s, tentando novamente...", peerAddr)
+		}
+	}
+}
+
+// enviarRegistro envia uma requisição POST para o endpoint /register de um peer.
+func (s *Servidor) enviarRegistro(peerAddr string) bool {
+	url := fmt.Sprintf("http://%s/register", peerAddr)
+	meuInfo := InfoServidor{
+		Endereco:   s.MeuEndereco,
+		UltimoPing: time.Now(),
+		Ativo:      true,
+	}
+	jsonData, err := json.Marshal(meuInfo)
+	if err != nil {
+		return false
+	}
+
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		// Atualiza a lista de servidores com a resposta do peer
+		var servidoresRecebidos map[string]*InfoServidor
+		if err := json.NewDecoder(resp.Body).Decode(&servidoresRecebidos); err == nil {
+			s.mutexServidores.Lock()
+			for addr, info := range servidoresRecebidos {
+				if _, existe := s.Servidores[addr]; !existe {
+					s.Servidores[addr] = info
+					log.Printf("[Cluster] Peer %s descoberto através de %s", addr, peerAddr)
+				}
+			}
+			s.mutexServidores.Unlock()
+		}
+		return true
+	}
+	return false
 }
 
 // ==================== GERENCIAMENTO DE ESTOQUE ====================
