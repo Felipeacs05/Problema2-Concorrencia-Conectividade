@@ -127,9 +127,14 @@ func main() {
 
 	// Inicia processos concorrentes
 	go servidor.iniciarAPI()
-	go servidor.descobrirServidores() // Agora vai funcionar
-	go servidor.processoEleicao()
+	go servidor.descobrirServidores()
 	go servidor.enviarHeartbeats()
+
+	// Aguarda um tempo para descoberta de peers antes de iniciar eleições
+	go func() {
+		time.Sleep(10 * time.Second) // Aguarda 10 segundos para descoberta
+		servidor.processoEleicao()
+	}()
 
 	log.Println("Servidor pronto e operacional")
 	select {} // Mantém o programa rodando
@@ -819,6 +824,16 @@ func (s *Servidor) processoEleicao() {
 	defer ticker.Stop()
 
 	for range ticker.C {
+		// Só inicia eleição se houver pelo menos 2 servidores no cluster
+		s.mutexServidores.RLock()
+		totalServidores := len(s.Servidores)
+		s.mutexServidores.RUnlock()
+
+		if totalServidores < 2 {
+			log.Printf("[Cluster] Aguardando mais servidores (atual: %d/3)", totalServidores)
+			continue
+		}
+
 		s.mutexLider.RLock()
 		tempoSemLider := time.Since(s.UltimoHeartbeat)
 		souLider := s.SouLider
@@ -826,7 +841,7 @@ func (s *Servidor) processoEleicao() {
 
 		// Se não há líder há muito tempo, inicia eleição
 		if tempoSemLider > ELEICAO_TIMEOUT && !souLider {
-			log.Println("Iniciando processo de eleição")
+			log.Printf("[Cluster] Iniciando processo de eleição com %d servidores", totalServidores)
 			s.iniciarEleicao()
 		}
 	}
@@ -995,6 +1010,9 @@ func (s *Servidor) descobrirServidores() {
 
 	peers := strings.Split(peersStr, ",")
 	log.Printf("[Cluster] Peers para descoberta: %v", peers)
+
+	// Aguarda um pouco antes de tentar conectar com peers
+	time.Sleep(5 * time.Second)
 
 	for _, peerAddr := range peers {
 		if peerAddr != s.MeuEndereco {
