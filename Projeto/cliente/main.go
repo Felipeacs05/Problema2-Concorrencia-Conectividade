@@ -19,6 +19,8 @@ var (
 	meuID         string
 	mqttClient    mqtt.Client
 	salaAtual     string
+	oponenteID    string
+	oponenteNome  string
 	meuInventario []protocolo.Carta
 )
 
@@ -97,19 +99,38 @@ func main() {
 
 func conectarMQTT(broker string) error {
 	opts := mqtt.NewClientOptions()
-	opts.AddBroker(broker)
+	// Adiciona todos os brokers conhecidos para a tentativa de conexão.
+	// A biblioteca tentará se conectar a eles em ordem.
+	opts.AddBroker("tcp://broker1:1883")
+	opts.AddBroker("tcp://broker2:1883")
+	opts.AddBroker("tcp://broker3:1883")
 	opts.SetClientID("cliente_" + time.Now().Format("20060102150405"))
 	opts.SetCleanSession(true)
-	opts.SetAutoReconnect(true)
+	opts.SetAutoReconnect(true) // Habilita a reconexão automática da biblioteca
+	opts.SetConnectRetry(true)
+	opts.SetMaxReconnectInterval(10 * time.Second)
 
-	// Handler de mensagens perdidas
+	// Handler para quando a conexão for perdida
 	opts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
-		fmt.Printf("\n[ERRO] Conexão MQTT perdida: %v\n", err)
+		fmt.Printf("\n[AVISO] Conexão MQTT perdida: %v. Tentando reconectar...\n", err)
 	})
 
-	// Handler de reconexão
+	// Handler para quando a conexão for restabelecida
 	opts.SetOnConnectHandler(func(client mqtt.Client) {
-		fmt.Println("\n[INFO] Conectado ao broker MQTT")
+		fmt.Println("\n[INFO] Conectado ao broker MQTT.")
+		// Reinscreve nos tópicos para garantir o recebimento de mensagens após reconexão.
+		if meuID != "" {
+			topicoEventos := fmt.Sprintf("clientes/%s/eventos", meuID)
+			if token := client.Subscribe(topicoEventos, 0, handleMensagemServidor); token.Wait() && token.Error() != nil {
+				log.Printf("Erro ao reinscrever no tópico de eventos: %v", token.Error())
+			}
+		}
+		if salaAtual != "" {
+			topicoPartida := fmt.Sprintf("partidas/%s/eventos", salaAtual)
+			if token := client.Subscribe(topicoPartida, 0, handleEventoPartida); token.Wait() && token.Error() != nil {
+				log.Printf("Erro ao reinscrever no tópico da partida: %v", token.Error())
+			}
+		}
 	})
 
 	mqttClient = mqtt.NewClient(opts)
@@ -183,19 +204,24 @@ func processarMensagemServidor(msg protocolo.Mensagem) {
 		var dados protocolo.DadosPartidaEncontrada
 		json.Unmarshal(msg.Dados, &dados)
 		salaAtual = dados.SalaID
+		oponenteID = dados.OponenteID
+		oponenteNome = dados.OponenteNome
 
-		fmt.Printf("\n╔═══════════════════════════════════════╗\n")
-		fmt.Printf("║   PARTIDA ENCONTRADA!                 ║\n")
-		fmt.Printf("║   Oponente: %-25s ║\n", dados.OponenteNome)
-		fmt.Printf("║   Sala: %-29s ║\n", dados.SalaID[:12]+"...")
-		fmt.Printf("╚═══════════════════════════════════════╝\n")
-		fmt.Println("\n[INFO] Use /comprar para adquirir um pacote de cartas e iniciar o jogo.")
-		fmt.Print("> ")
+		fmt.Printf("\n[PARTIDA] Partida encontrada contra '%s'!\n", oponenteNome)
+		fmt.Println("Use /comprar para adquirir seu pacote inicial de cartas.")
 
 		// Subscreve aos eventos da partida
 		topicoPartida := fmt.Sprintf("partidas/%s/eventos", salaAtual)
-		token := mqttClient.Subscribe(topicoPartida, 0, handleEventoPartida)
-		token.Wait()
+		if token := mqttClient.Subscribe(topicoPartida, 0, handleEventoPartida); token.Wait() && token.Error() != nil {
+			log.Printf("Erro ao se inscrever no tópico da partida: %v", token.Error())
+		}
+
+	case "TROCA_CONCLUIDA":
+		var resp protocolo.TrocarCartasResp
+		json.Unmarshal(msg.Dados, &resp)
+		fmt.Printf("\n[TROCA] %s\n", resp.Mensagem)
+		mostrarCartas() // Mostra o inventário atualizado
+		fmt.Print("> ")
 
 	case "PACOTE_RESULTADO":
 		var dados protocolo.ComprarPacoteResp
@@ -335,9 +361,10 @@ func processarComando(entrada string) {
 	case "/sair":
 		fmt.Println("Saindo...")
 		os.Exit(0)
-
+	case "/trocar":
+		iniciarProcessoDeTroca()
 	default:
-		// Trata como mensagem de chat
+		// Se não for um comando, envia como chat
 		if salaAtual != "" {
 			enviarChat(entrada)
 		} else {
@@ -446,18 +473,63 @@ func mostrarCartas() {
 }
 
 func mostrarAjuda() {
-	fmt.Println("\n╔═══════════════════════════════════════════════════════════╗")
-	fmt.Println("║                    COMANDOS DISPONÍVEIS                   ║")
-	fmt.Println("╠═══════════════════════════════════════════════════════════╣")
-	fmt.Println("║ /comprar             - Compra um pacote de 5 cartas       ║")
-	fmt.Println("║ /jogar <ID>          - Joga uma carta (use o ID da carta) ║")
-	fmt.Println("║ /cartas              - Mostra suas cartas na mão          ║")
-	fmt.Println("║ /ajuda               - Mostra esta ajuda                  ║")
-	fmt.Println("║ /sair                - Sai do jogo                        ║")
-	fmt.Println("║                                                           ║")
-	fmt.Println("║ Qualquer outro texto será enviado como chat              ║")
-	fmt.Println("╚═══════════════════════════════════════════════════════════╝")
-	fmt.Println()
+	fmt.Println("\nComandos disponíveis:")
+	fmt.Println("  /cartas                - Mostra suas cartas")
+	fmt.Println("  /comprar               - Compra um novo pacote de cartas")
+	fmt.Println("  /jogar <ID_da_carta>   - Joga uma carta da sua mão")
+	fmt.Println("  /trocar                - Propõe uma troca de cartas com o oponente")
+	fmt.Println("  /ajuda                 - Mostra esta lista de comandos")
+	fmt.Println("  /sair                  - Sai do jogo")
+	fmt.Println("  Qualquer outro texto será enviado como chat.")
+}
+
+func iniciarProcessoDeTroca() {
+	if salaAtual == "" {
+		fmt.Println("Você precisa estar em uma partida para trocar cartas.")
+		return
+	}
+	if oponenteID == "" || oponenteNome == "" {
+		fmt.Println("Não foi possível identificar seu oponente para a troca.")
+		return
+	}
+
+	scanner := bufio.NewScanner(os.Stdin)
+
+	fmt.Println("\n--- Propor Troca de Cartas ---")
+	mostrarCartas()
+
+	fmt.Print("Digite o ID da carta que você quer OFERECER: ")
+	scanner.Scan()
+	cartaOferecidaID := strings.TrimSpace(scanner.Text())
+
+	fmt.Print("Digite o ID da carta do oponente que você quer RECEBER: ")
+	scanner.Scan()
+	cartaDesejadaID := strings.TrimSpace(scanner.Text())
+
+	if cartaOferecidaID == "" || cartaDesejadaID == "" {
+		fmt.Println("IDs das cartas não podem ser vazios. Abortando troca.")
+		return
+	}
+
+	fmt.Printf("Enviando proposta de troca para %s...\n", oponenteNome)
+
+	req := protocolo.TrocarCartasReq{
+		IDJogadorOferta:     meuID,
+		NomeJogadorOferta:   meuNome,
+		IDJogadorDesejado:   oponenteID,
+		NomeJogadorDesejado: oponenteNome,
+		IDCartaOferecida:    cartaOferecidaID,
+		IDCartaDesejada:     cartaDesejadaID,
+	}
+
+	msg := protocolo.Mensagem{
+		Comando: "TROCAR_CARTAS_OFERTA",
+		Dados:   mustJSON(req),
+	}
+
+	payload, _ := json.Marshal(msg)
+	topico := fmt.Sprintf("partidas/%s/comandos", salaAtual)
+	mqttClient.Publish(topico, 0, false, payload)
 }
 
 func mustJSON(v interface{}) []byte {
