@@ -120,28 +120,33 @@ var (
 
 func main() {
 	flag.Parse()
-
-	log.Printf("Iniciando servidor em %s | Broker MQTT: %s", *meuEndereco, *brokerMQTT)
-
 	servidor := novoServidor(*meuEndereco, *brokerMQTT)
+	servidor.Run()
+}
+
+func (s *Servidor) Run() {
+	log.Printf("Iniciando servidor em %s | Broker MQTT: %s", s.MeuEndereco, s.BrokerMQTT)
+
+	s.inicializarEstoque()
+
+	if err := s.conectarMQTT(); err != nil {
+		log.Fatalf("Erro fatal ao conectar ao MQTT: %v", err)
+	}
 
 	// Inicia processos concorrentes
-	go servidor.iniciarAPI()
-	go servidor.descobrirServidores()
-	go servidor.enviarHeartbeats()
+	go s.iniciarAPI()
+	go s.descobrirServidores()
+	go s.enviarHeartbeats()
 
 	// Aguarda um tempo para descoberta de peers antes de iniciar eleições
-	go func() {
-		time.Sleep(10 * time.Second) // Aguarda 10 segundos para descoberta
-		servidor.processoEleicao()
-	}()
+	go s.processoEleicao()
 
 	log.Println("Servidor pronto e operacional")
 	select {} // Mantém o programa rodando
 }
 
 func novoServidor(endereco, broker string) *Servidor {
-	s := &Servidor{
+	return &Servidor{
 		MeuEndereco:     endereco,
 		BrokerMQTT:      broker,
 		Servidores:      make(map[string]*InfoServidor),
@@ -154,14 +159,6 @@ func novoServidor(endereco, broker string) *Servidor {
 		VotosRecebidos:  make(chan bool, 10),
 		PararEleicao:    make(chan bool, 1),
 	}
-
-	s.inicializarEstoque()
-
-	if err := s.conectarMQTT(); err != nil {
-		log.Fatalf("Erro fatal ao conectar ao MQTT: %v", err)
-	}
-
-	return s
 }
 
 // ==================== MQTT ====================
@@ -820,17 +817,19 @@ func (s *Servidor) handleConfirmarPartida(c *gin.Context) {
 // ==================== LÓGICA DE ELEIÇÃO DE LÍDER ====================
 
 func (s *Servidor) processoEleicao() {
-	ticker := time.NewTicker(5 * time.Second)
+	// Atraso inicial aleatório para evitar que todos iniciem a eleição ao mesmo tempo
+	time.Sleep(time.Duration(5+rand.Intn(5)) * time.Second)
+
+	ticker := time.NewTicker(ELEICAO_TIMEOUT)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		// Só inicia eleição se houver pelo menos 2 servidores no cluster
 		s.mutexServidores.RLock()
-		totalServidores := len(s.Servidores)
+		numServidores := len(s.Servidores)
 		s.mutexServidores.RUnlock()
 
-		if totalServidores < 2 {
-			log.Printf("[Cluster] Aguardando mais servidores (atual: %d/3)", totalServidores)
+		if numServidores < 2 {
+			log.Printf("[Cluster] Aguardando mais servidores para iniciar eleição (atual: %d)", numServidores)
 			continue
 		}
 
@@ -841,8 +840,8 @@ func (s *Servidor) processoEleicao() {
 
 		// Se não há líder há muito tempo, inicia eleição
 		if tempoSemLider > ELEICAO_TIMEOUT && !souLider {
-			log.Printf("[Cluster] Iniciando processo de eleição com %d servidores", totalServidores)
-			s.iniciarEleicao()
+			log.Printf("[Cluster] Timeout! Iniciando processo de eleição com %d servidores.", numServidores)
+			go s.iniciarEleicao()
 		}
 	}
 }
@@ -1011,9 +1010,7 @@ func (s *Servidor) descobrirServidores() {
 	peers := strings.Split(peersStr, ",")
 	log.Printf("[Cluster] Peers para descoberta: %v", peers)
 
-	// Aguarda um pouco antes de tentar conectar com peers
-	time.Sleep(5 * time.Second)
-
+	// Tenta se conectar aos peers em segundo plano
 	for _, peerAddr := range peers {
 		if peerAddr != s.MeuEndereco {
 			// Tenta se registrar com cada peer em uma goroutine
@@ -1022,7 +1019,7 @@ func (s *Servidor) descobrirServidores() {
 	}
 
 	// Verifica periodicamente servidores inativos
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
