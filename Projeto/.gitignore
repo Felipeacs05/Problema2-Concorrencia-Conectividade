@@ -4,8 +4,8 @@
 *.dll
 *.so
 *.dylib
-servidor
-cliente
+/bin/servidor
+/bin/cliente
 
 # Arquivos de teste
 *.test
