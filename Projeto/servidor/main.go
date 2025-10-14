@@ -96,13 +96,18 @@ type Servidor struct {
 	Estoque      map[string][]Carta // raridade -> cartas
 	mutexEstoque sync.Mutex
 
-	// Clientes e Salas
+	// Gerenciamento de Partidas
 	Clientes      map[string]*Cliente // clienteID -> Cliente
 	mutexClientes sync.RWMutex
 	Salas         map[string]*Sala // salaID -> Sala
 	mutexSalas    sync.RWMutex
 	FilaDeEspera  []*Cliente
 	mutexFila     sync.Mutex
+	ComandosPartida map[string]chan protocolo.Comando
+
+	// Canais para controle de eleição
+	VotosRecebidos chan bool
+	PararEleicao   chan bool
 }
 
 // ==================== INICIALIZAÇÃO ====================
@@ -521,6 +526,72 @@ func (s *Servidor) handleStatusEstoque(c *gin.Context) {
 		"total":   s.contarEstoque(),
 		"lider":   s.SouLider,
 	})
+}
+
+// souLider verifica de forma segura se o nó atual é o líder.
+func (s *Servidor) souLider() bool {
+	s.mutexLider.RLock()
+	defer s.mutexLider.RUnlock()
+	return s.SouLider
+}
+
+// encaminharParaLider repassa uma requisição HTTP para o líder atual.
+func (s *Servidor) encaminharParaLider(c *gin.Context) {
+	s.mutexLider.RLock()
+	liderAddr := s.LiderAtual
+	s.mutexLider.RUnlock()
+
+	if liderAddr == "" {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Líder não disponível no momento"})
+		return
+	}
+
+	url := fmt.Sprintf("http://%s%s", liderAddr, c.Request.URL.Path)
+	proxyReq, err := http.NewRequest(c.Request.Method, url, c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Falha ao criar proxy da requisição"})
+		return
+	}
+
+	proxyReq.Header = c.Request.Header
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(proxyReq)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "Falha ao encaminhar requisição para o líder"})
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copia a resposta do líder de volta para o cliente original
+	c.DataFromReader(resp.StatusCode, resp.ContentLength, resp.Header.Get("Content-Type"), resp.Body, nil)
+}
+
+// formarPacote cria um pacote de cartas aleatórias a partir do estoque.
+func (s *Servidor) formarPacote() ([]Carta, error) {
+	if s.contarEstoqueTotal() < PACOTE_SIZE {
+		return nil, fmt.Errorf("estoque insuficiente para formar um pacote")
+	}
+
+	pacote := make([]Carta, 0, PACOTE_SIZE)
+	for len(pacote) < PACOTE_SIZE {
+		raridade := s.escolherRaridade()
+		if len(s.Estoque[raridade]) > 0 {
+			carta := s.Estoque[raridade][0]
+			s.Estoque[raridade] = s.Estoque[raridade][1:]
+			pacote = append(pacote, carta)
+		}
+	}
+	return pacote, nil
+}
+
+// notificarCompraSucesso envia uma mensagem MQTT para o cliente com as cartas compradas.
+func (s *Servidor) notificarCompraSucesso(clienteID string, pacote []Carta) {
+	topico := fmt.Sprintf("clientes/%s/eventos", clienteID)
+	payload, _ := json.Marshal(gin.H{
+		"evento": "COMPRA_SUCESSO",
+		"cartas": pacote,
+	})
+	s.MQTTClient.Publish(topico, 0, false, payload)
 }
 
 // Handlers de partida
@@ -1134,7 +1205,30 @@ func (s *Servidor) contarEstoque() int {
 	return total
 }
 
+func (s *Servidor) contarEstoqueTotal() int {
+	total := 0
+	for _, cartas := range s.Estoque {
+		total += len(cartas)
+	}
+	return total
+}
+
 func sampleRaridade() string {
+	x := rand.Intn(100)
+	if x < 70 {
+		return "C"
+	}
+	if x < 90 {
+		return "U"
+	}
+	if x < 99 {
+		return "R"
+	}
+	return "L"
+}
+
+// escolherRaridade retorna uma raridade aleatória para formar o pacote.
+func (s *Servidor) escolherRaridade() string {
 	x := rand.Intn(100)
 	if x < 70 {
 		return "C"

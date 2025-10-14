@@ -94,6 +94,13 @@ type DadosFimDeJogo struct {
 	VencedorNome string `json:"vencedorNome"` // Nome do vencedor final / "EMPATE" em caso de empate
 }
 
+// Comando representa uma ação de um jogador em uma partida
+type Comando struct {
+	ClienteID string
+	Tipo      string // Ex: "JOGAR_CARTA"
+	Payload   json.RawMessage
+}
+
 /* ===================== Erro ===================== */
 
 // Estrutura para mensagens de erro
