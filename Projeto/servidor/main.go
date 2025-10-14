@@ -97,12 +97,12 @@ type Servidor struct {
 	mutexEstoque sync.Mutex
 
 	// Gerenciamento de Partidas
-	Clientes      map[string]*Cliente // clienteID -> Cliente
-	mutexClientes sync.RWMutex
-	Salas         map[string]*Sala // salaID -> Sala
-	mutexSalas    sync.RWMutex
-	FilaDeEspera  []*Cliente
-	mutexFila     sync.Mutex
+	Clientes        map[string]*Cliente // clienteID -> Cliente
+	mutexClientes   sync.RWMutex
+	Salas           map[string]*Sala // salaID -> Sala
+	mutexSalas      sync.RWMutex
+	FilaDeEspera    []*Cliente
+	mutexFila       sync.Mutex
 	ComandosPartida map[string]chan protocolo.Comando
 
 	// Canais para controle de eleição
@@ -144,10 +144,10 @@ func novoServidor(endereco, broker string) *Servidor {
 		Estoque:         make(map[string][]Carta),
 		Clientes:        make(map[string]*Cliente),
 		Salas:           make(map[string]*Sala),
-		FilaDeEspera:    make(chan *Cliente, 100), // Fila com buffer
-		VotosRecebidos:  make(chan bool),
-		PararEleicao:    make(chan bool),
+		FilaDeEspera:    make([]*Cliente, 0), // Slice vazio
 		ComandosPartida: make(map[string]chan protocolo.Comando),
+		VotosRecebidos:  make(chan bool, 10),
+		PararEleicao:    make(chan bool, 1),
 	}
 
 	s.inicializarEstoque()
@@ -179,6 +179,14 @@ func (s *Servidor) conectarMQTT() error {
 	// Subscreve a tópicos importantes
 	s.subscreverTopicos()
 	return nil
+}
+
+// subscreverTopicos centraliza as subscrições MQTT.
+func (s *Servidor) subscreverTopicos() {
+	s.MQTTClient.Subscribe("clientes/+/login", 0, s.handleClienteLogin)
+	s.MQTTClient.Subscribe("clientes/+/entrar_fila", 0, s.handleClienteEntrarFila)
+	s.MQTTClient.Subscribe("partidas/+/comandos", 0, s.handleComandoPartida)
+	log.Println("Subscreveu aos tópicos MQTT essenciais")
 }
 
 func (s *Servidor) handleClienteLogin(client mqtt.Client, msg mqtt.Message) {
