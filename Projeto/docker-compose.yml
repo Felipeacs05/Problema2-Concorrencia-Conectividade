@@ -16,11 +16,6 @@ services:
     networks:
       - game_network
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "timeout 1 sh -c 'cat < /dev/null > /dev/tcp/127.0.0.1/1883' || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
 
   # Broker 2 - Associado ao Servidor 2
   broker2:
@@ -36,11 +31,6 @@ services:
     networks:
       - game_network
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "timeout 1 sh -c 'cat < /dev/null > /dev/tcp/127.0.0.1/1883' || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
 
   # Broker 3 - Associado ao Servidor 3
   broker3:
@@ -56,11 +46,6 @@ services:
     networks:
       - game_network
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "timeout 1 sh -c 'cat < /dev/null > /dev/tcp/127.0.0.1/1883' || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
 
   # ==================== SERVIDORES DE JOGO ====================
   
@@ -75,7 +60,7 @@ services:
       - "8080:8080"
     depends_on:
       broker1:
-        condition: service_healthy
+        condition: service_started
     networks:
       - game_network
     restart: unless-stopped
@@ -98,7 +83,7 @@ services:
       - "8081:8080"
     depends_on:
       broker2:
-        condition: service_healthy
+        condition: service_started
       servidor1:
         condition: service_healthy
     networks:
@@ -123,7 +108,7 @@ services:
       - "8082:8080"
     depends_on:
       broker3:
-        condition: service_healthy
+        condition: service_started
       servidor1:
         condition: service_healthy
     networks:
