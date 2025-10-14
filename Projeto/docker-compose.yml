@@ -71,6 +71,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+      start_period: 30s
 
   # Servidor 2
   servidor2:
@@ -96,6 +97,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+      start_period: 30s
 
   # Servidor 3
   servidor3:
@@ -121,6 +123,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+      start_period: 30s
 
   # ==================== CLIENTES (OPCIONAL PARA TESTES) ====================
   
