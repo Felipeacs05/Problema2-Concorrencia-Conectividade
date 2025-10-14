@@ -69,10 +69,10 @@ services:
       - PEERS=servidor1:8080,servidor2:8080,servidor3:8080
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/servers"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   # Servidor 2
   servidor2:
@@ -96,10 +96,10 @@ services:
       - PEERS=servidor1:8080,servidor2:8080,servidor3:8080
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/servers"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   # Servidor 3
   servidor3:
@@ -113,7 +113,7 @@ services:
     depends_on:
       broker3:
         condition: service_started
-      servidor1:
+      servidor2:
         condition: service_healthy
     networks:
       - game_network
@@ -123,10 +123,10 @@ services:
       - PEERS=servidor1:8080,servidor2:8080,servidor3:8080
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/servers"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   # ==================== CLIENTES (OPCIONAL PARA TESTES) ====================
   
