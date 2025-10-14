@@ -17,7 +17,7 @@ services:
       - game_network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "mosquitto_sub", "-t", "test", "-E", "-i", "healthcheck", "-W", "3"]
+      test: ["CMD-SHELL", "timeout 1 sh -c 'cat < /dev/null > /dev/tcp/127.0.0.1/1883' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -37,7 +37,7 @@ services:
       - game_network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "mosquitto_sub", "-t", "test", "-E", "-i", "healthcheck", "-W", "3"]
+      test: ["CMD-SHELL", "timeout 1 sh -c 'cat < /dev/null > /dev/tcp/127.0.0.1/1883' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -57,7 +57,7 @@ services:
       - game_network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "mosquitto_sub", "-t", "test", "-E", "-i", "healthcheck", "-W", "3"]
+      test: ["CMD-SHELL", "timeout 1 sh -c 'cat < /dev/null > /dev/tcp/127.0.0.1/1883' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3
