@@ -5,31 +5,37 @@ services:
     image: eclipse-mosquitto:latest
     container_name: broker1
     ports:
-      - "1886:1883"
-    volumes: # <-- ADICIONE ESTAS 3 LINHAS
+      - "1886:1883" # Usando a porta 1886 que já corrigimos
+    volumes:
       - ./mosquitto/config:/mosquitto/config
       - broker1_data:/mosquitto/data
       - broker1_log:/mosquitto/log
+    networks: # <-- ADICIONE ESTAS DUAS LINHAS
+      - game_network
 
   broker2:
     image: eclipse-mosquitto:latest
     container_name: broker2
     ports:
       - "1884:1883"
-    volumes: # <-- ADICIONE ESTAS 3 LINHAS
+    volumes:
       - ./mosquitto/config:/mosquitto/config
       - broker2_data:/mosquitto/data
       - broker2_log:/mosquitto/log
+    networks: # <-- ADICIONE ESTAS DUAS LINHAS
+      - game_network
 
   broker3:
     image: eclipse-mosquitto:latest
     container_name: broker3
     ports:
       - "1885:1883"
-    volumes: # <-- ADICIONE ESTAS 3 LINHAS
+    volumes:
       - ./mosquitto/config:/mosquitto/config
       - broker3_data:/mosquitto/data
       - broker3_log:/mosquitto/log
+    networks: # <-- ADICIONE ESTAS DUAS LINHAS
+      - game_network
   # ==================== SERVIDORES DE JOGO ====================
   
   # Servidor 1
