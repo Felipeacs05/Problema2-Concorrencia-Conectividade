@@ -1,52 +1,35 @@
 
 services:
   # ==================== BROKERS MQTT ====================
-  
-  # Broker 1 - Associado ao Servidor 1
   broker1:
-    image: eclipse-mosquitto:2.0
+    image: eclipse-mosquitto:latest
     container_name: broker1
     ports:
-      - "1883:1883"
-      - "9001:9001"
-    volumes:
+      - "1886:1883"
+    volumes: # <-- ADICIONE ESTAS 3 LINHAS
       - ./mosquitto/config:/mosquitto/config
       - broker1_data:/mosquitto/data
       - broker1_log:/mosquitto/log
-    networks:
-      - game_network
-    restart: unless-stopped
 
-  # Broker 2 - Associado ao Servidor 2
   broker2:
-    image: eclipse-mosquitto:2.0
+    image: eclipse-mosquitto:latest
     container_name: broker2
     ports:
       - "1884:1883"
-      - "9002:9001"
-    volumes:
+    volumes: # <-- ADICIONE ESTAS 3 LINHAS
       - ./mosquitto/config:/mosquitto/config
       - broker2_data:/mosquitto/data
       - broker2_log:/mosquitto/log
-    networks:
-      - game_network
-    restart: unless-stopped
 
-  # Broker 3 - Associado ao Servidor 3
   broker3:
-    image: eclipse-mosquitto:2.0
+    image: eclipse-mosquitto:latest
     container_name: broker3
     ports:
       - "1885:1883"
-      - "9003:9001"
-    volumes:
+    volumes: # <-- ADICIONE ESTAS 3 LINHAS
       - ./mosquitto/config:/mosquitto/config
       - broker3_data:/mosquitto/data
       - broker3_log:/mosquitto/log
-    networks:
-      - game_network
-    restart: unless-stopped
-
   # ==================== SERVIDORES DE JOGO ====================
   
   # Servidor 1
