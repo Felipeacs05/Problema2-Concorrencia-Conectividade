@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"jogodistribuido/protocolo"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
+	"github.com/google/uuid"
 )
 
 var (
@@ -26,10 +28,8 @@ var (
 
 func main() {
 	fmt.Println("=== Jogo de Cartas Multiplayer Distribuído ===")
-
 	scanner := bufio.NewScanner(os.Stdin)
 
-	// Solicita nome do usuário
 	fmt.Print("Digite seu nome: ")
 	scanner.Scan()
 	meuNome = strings.TrimSpace(scanner.Text())
@@ -37,61 +37,46 @@ func main() {
 		meuNome = "Jogador"
 	}
 
-	// Escolhe o servidor
+	// --- LÓGICA DE ESCOLHA CORRIGIDA ---
+	serverMap := map[int]string{
+		1: "tcp://broker1:1883",
+		2: "tcp://broker2:1883",
+		3: "tcp://broker3:1883",
+	}
 	fmt.Println("\nEscolha o servidor para conectar:")
 	fmt.Println("1. Servidor 1")
 	fmt.Println("2. Servidor 2")
-	fmt.Println("3. Servidor 3")
+	fmt.Println("3. Servidor 3") //asdaddasdsd
 	fmt.Print("Opção: ")
-
 	scanner.Scan()
-	opcao := strings.TrimSpace(scanner.Text())
-
-	var brokerAddr string
-	switch opcao {
-	case "1":
-		brokerAddr = "tcp://broker1:1883"
-	case "2":
-		brokerAddr = "tcp://broker2:1883"
-	case "3":
-		brokerAddr = "tcp://broker3:1883"
-	default:
-		brokerAddr = "tcp://broker1:1883"
-		fmt.Println("Opção inválida. Conectando ao Servidor 1...")
+	opcaoStr := scanner.Text()
+	opcao, err := strconv.Atoi(opcaoStr)
+	if err != nil || serverMap[opcao] == "" {
+		log.Fatalf("Opção inválida.")
 	}
+	brokerAddr := serverMap[opcao]
+	// --- FIM DA CORREÇÃO ---
 
 	fmt.Printf("\nConectando ao broker MQTT: %s\n", brokerAddr)
 
-	// Conecta ao broker MQTT
 	if err := conectarMQTT(brokerAddr); err != nil {
 		log.Fatalf("Erro ao conectar ao MQTT: %v", err)
 	}
 
-	// Faz login
-	fazerLogin()
-
-	// Aguarda receber ID do servidor
-	time.Sleep(1 * time.Second)
-
-	if meuID == "" {
-		log.Fatal("Não foi possível obter ID do servidor")
+	// --- LÓGICA DE LOGIN CORRIGIDA ---
+	if err := fazerLogin(); err != nil {
+		log.Fatalf("Erro no processo de login: %v", err)
 	}
+	// --- FIM DA CORREÇÃO ---
 
-	fmt.Printf("\nBem-vindo, %s! (ID: %s)\n", meuNome, meuID)
+	fmt.Printf("\nBem-vindo, %s! (Seu ID: %s)\n", meuNome, meuID)
 	fmt.Println("\nEntrando na fila de matchmaking...")
 	entrarNaFila()
 
-	// Mostra comandos disponíveis
 	mostrarAjuda()
 
-	// Loop principal de interface
 	for scanner.Scan() {
 		entrada := strings.TrimSpace(scanner.Text())
-		if entrada == "" {
-			fmt.Print("> ")
-			continue
-		}
-
 		processarComando(entrada)
 		fmt.Print("> ")
 	}
@@ -99,68 +84,85 @@ func main() {
 
 func conectarMQTT(broker string) error {
 	opts := mqtt.NewClientOptions()
-	// Adiciona todos os brokers conhecidos para a tentativa de conexão.
-	// A biblioteca tentará se conectar a eles em ordem.
-	opts.AddBroker("tcp://broker1:1883")
-	opts.AddBroker("tcp://broker2:1883")
-	opts.AddBroker("tcp://broker3:1883")
+	// --- CORREÇÃO APLICADA AQUI ---
+	// Adiciona apenas o broker que o utilizador escolheu.
+	opts.AddBroker(broker)
+	// --- FIM DA CORREÇÃO ---
 	opts.SetClientID("cliente_" + time.Now().Format("20060102150405"))
 	opts.SetCleanSession(true)
-	opts.SetAutoReconnect(true) // Habilita a reconexão automática da biblioteca
+	opts.SetAutoReconnect(true)
 	opts.SetConnectRetry(true)
 	opts.SetMaxReconnectInterval(10 * time.Second)
-
-	// Handler para quando a conexão for perdida
 	opts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
 		fmt.Printf("\n[AVISO] Conexão MQTT perdida: %v. Tentando reconectar...\n", err)
 	})
-
-	// Handler para quando a conexão for restabelecida
 	opts.SetOnConnectHandler(func(client mqtt.Client) {
 		fmt.Println("\n[INFO] Conectado ao broker MQTT.")
-		// Reinscreve nos tópicos para garantir o recebimento de mensagens após reconexão.
 		if meuID != "" {
+			// Reinscreve nos tópicos importantes após reconexão
 			topicoEventos := fmt.Sprintf("clientes/%s/eventos", meuID)
-			if token := client.Subscribe(topicoEventos, 0, handleMensagemServidor); token.Wait() && token.Error() != nil {
-				log.Printf("Erro ao reinscrever no tópico de eventos: %v", token.Error())
-			}
-		}
-		if salaAtual != "" {
-			topicoPartida := fmt.Sprintf("partidas/%s/eventos", salaAtual)
-			if token := client.Subscribe(topicoPartida, 0, handleEventoPartida); token.Wait() && token.Error() != nil {
-				log.Printf("Erro ao reinscrever no tópico da partida: %v", token.Error())
+			client.Subscribe(topicoEventos, 0, handleMensagemServidor)
+			if salaAtual != "" {
+				topicoPartida := fmt.Sprintf("partidas/%s/eventos", salaAtual)
+				client.Subscribe(topicoPartida, 0, handleEventoPartida)
 			}
 		}
 	})
 
 	mqttClient = mqtt.NewClient(opts)
-
 	if token := mqttClient.Connect(); token.Wait() && token.Error() != nil {
 		return token.Error()
 	}
-
 	return nil
 }
 
-func fazerLogin() {
-	// Publica mensagem de login
-	dados := protocolo.DadosLogin{Nome: meuNome}
-	payload, _ := json.Marshal(dados)
+func fazerLogin() error {
+	// Cria um canal para esperar a resposta do login
+	loginResponseChan := make(chan protocolo.Mensagem)
 
-	topico := fmt.Sprintf("clientes/%s/login", meuNome)
-	token := mqttClient.Publish(topico, 0, false, payload)
-	token.Wait()
+	// Gera um ID temporário único para esta sessão de login
+	tempID := uuid.New().String()
+	responseTopic := fmt.Sprintf("clientes/%s/eventos", tempID)
 
-	// Subscreve ao tópico de eventos do cliente
-	// Precisa esperar o servidor enviar o ID, então subscreve a um tópico temporário
-	topicoTemporario := fmt.Sprintf("clientes/%s/eventos", meuNome)
-	token = mqttClient.Subscribe(topicoTemporario, 0, handleMensagemServidor)
-	token.Wait()
+	// Inscreve-se no tópico de resposta ANTES de enviar o pedido
+	if token := mqttClient.Subscribe(responseTopic, 1, func(c mqtt.Client, m mqtt.Message) {
+		var msg protocolo.Mensagem
+		if err := json.Unmarshal(m.Payload(), &msg); err == nil {
+			loginResponseChan <- msg
+		}
+	}); token.Wait() && token.Error() != nil {
+		return fmt.Errorf("falha ao se inscrever no tópico de resposta: %v", token.Error())
+	}
 
-	// Aguarda um pouco para receber o ID
-	time.Sleep(500 * time.Millisecond)
+	// Publica a mensagem de login num tópico que o servidor ouve
+	dadosLogin := protocolo.DadosLogin{Nome: meuNome}
+	msgLogin := protocolo.Mensagem{Comando: "LOGIN", Dados: mustJSON(dadosLogin)}
+	payloadLogin, _ := json.Marshal(msgLogin)
+	// O tópico de login agora inclui o ID temporário para o servidor saber para onde responder
+	loginTopic := fmt.Sprintf("clientes/%s/login", tempID)
+	mqttClient.Publish(loginTopic, 1, false, payloadLogin)
+
+	// Aguarda a resposta por um tempo limitado (sem time.Sleep!)
+	select {
+	case resp := <-loginResponseChan:
+		if resp.Comando == "LOGIN_OK" {
+			var dados map[string]string
+			json.Unmarshal(resp.Dados, &dados)
+			meuID = dados["cliente_id"] // Guarda o ID permanente recebido do servidor
+			servidor := dados["servidor"]
+			fmt.Printf("\n[LOGIN] Conectado ao servidor %s\n", servidor)
+
+			// Limpa a inscrição temporária e inscreve-se na permanente
+			mqttClient.Unsubscribe(responseTopic)
+			permanentTopic := fmt.Sprintf("clientes/%s/eventos", meuID)
+			mqttClient.Subscribe(permanentTopic, 1, handleMensagemServidor)
+			return nil
+		}
+		return fmt.Errorf("resposta de login inesperada: %s", resp.Comando)
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("não foi possível obter ID do servidor (timeout)")
+	}
 }
-
 func entrarNaFila() {
 	dados := map[string]string{"cliente_id": meuID}
 	payload, _ := json.Marshal(dados)

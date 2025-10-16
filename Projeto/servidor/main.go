@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -76,6 +77,7 @@ type EstadoPartida struct {
 
 // Servidor é a estrutura principal que gerencia o servidor distribuído
 type Servidor struct {
+	ServerID        string
 	MeuEndereco     string
 	MeuEnderecoHTTP string
 	BrokerMQTT      string
@@ -146,7 +148,13 @@ func (s *Servidor) Run() {
 }
 
 func novoServidor(endereco, broker string) *Servidor {
+	serverID := os.Getenv("SERVER_ID")
+	if serverID == "" {
+		log.Fatal("A variável de ambiente SERVER_ID não foi definida!")
+	}
+
 	return &Servidor{
+		ServerID:        serverID, // Adiciona o ID limpo
 		MeuEndereco:     endereco,
 		BrokerMQTT:      broker,
 		Servidores:      make(map[string]*InfoServidor),
@@ -154,7 +162,7 @@ func novoServidor(endereco, broker string) *Servidor {
 		Estoque:         make(map[string][]Carta),
 		Clientes:        make(map[string]*Cliente),
 		Salas:           make(map[string]*Sala),
-		FilaDeEspera:    make([]*Cliente, 0), // Slice vazio
+		FilaDeEspera:    make([]*Cliente, 0),
 		ComandosPartida: make(map[string]chan protocolo.Comando),
 		VotosRecebidos:  make(chan bool, 10),
 		PararEleicao:    make(chan bool, 1),
@@ -185,12 +193,43 @@ func (s *Servidor) conectarMQTT() error {
 
 // subscreverTopicos centraliza as subscrições MQTT.
 func (s *Servidor) subscreverTopicos() {
+	// Inscrição para responder a pedidos de informação dos clientes
+	infoTopic := fmt.Sprintf("servidores/%s/info_req/+", s.ServerID)
+	if token := s.MQTTClient.Subscribe(infoTopic, 1, s.handleInfoRequest); token.Wait() && token.Error() != nil {
+		log.Printf("Erro ao subscrever ao tópico de info: %v", token.Error())
+	}
+
 	s.MQTTClient.Subscribe("clientes/+/login", 0, s.handleClienteLogin)
 	s.MQTTClient.Subscribe("clientes/+/entrar_fila", 0, s.handleClienteEntrarFila)
 	s.MQTTClient.Subscribe("partidas/+/comandos", 0, s.handleComandoPartida)
 	log.Println("Subscreveu aos tópicos MQTT essenciais")
 }
 
+// handleInfoRequest processa um pedido de informação de um cliente e responde.
+func (s *Servidor) handleInfoRequest(client mqtt.Client, msg mqtt.Message) {
+	// O tópico tem o formato: servidores/{serverID}/info_req/{clientID}
+	parts := strings.Split(msg.Topic(), "/")
+	if len(parts) < 4 {
+		log.Printf("Tópico de info request inválido recebido: %s", msg.Topic())
+		return
+	}
+	clientID := parts[3]
+
+	log.Printf("[INFO] Recebido pedido de informação do cliente %s", clientID)
+
+	// Prepara a mensagem de resposta
+	responsePayload, _ := json.Marshal(map[string]string{
+		"server_id": s.ServerID,
+	})
+
+	responseMsg := protocolo.Mensagem{
+		Comando: "INFO_SERVIDOR_RESP",
+		Dados:   responsePayload,
+	}
+
+	// Publica a resposta no tópico de eventos privados do cliente
+	s.publicarParaCliente(clientID, responseMsg)
+}
 func (s *Servidor) handleClienteLogin(client mqtt.Client, msg mqtt.Message) {
 	var dados protocolo.DadosLogin
 	if err := json.Unmarshal(msg.Payload(), &dados); err != nil {
@@ -1024,6 +1063,11 @@ func (s *Servidor) enviarHeartbeats() {
 // ==================== DESCOBERTA DE SERVIDORES ====================
 
 func (s *Servidor) descobrirServidores() {
+	// Cria um contexto que pode ser cancelado.
+	// Por simplicidade, usamos context.Background() que nunca é cancelado,
+	// mas numa aplicação real, você passaria um contexto de cancelamento.
+	ctx := context.Background()
+
 	// Adiciona a si mesmo à lista
 	s.mutexServidores.Lock()
 	s.Servidores[s.MeuEndereco] = &InfoServidor{
@@ -1047,7 +1091,7 @@ func (s *Servidor) descobrirServidores() {
 	for _, peerAddr := range peers {
 		if peerAddr != s.MeuEndereco {
 			// Tenta se registrar com cada peer em uma goroutine
-			go s.registrarComPeer(peerAddr)
+			go s.registrarComPeer(ctx, peerAddr) // Passa o contexto aqui
 		}
 	}
 
@@ -1074,19 +1118,27 @@ func (s *Servidor) descobrirServidores() {
 }
 
 // registrarComPeer tenta se registrar com um peer até ter sucesso.
-func (s *Servidor) registrarComPeer(peerAddr string) {
+// registrarComPeer tenta se registrar com um peer e respeita o cancelamento via contexto.
+func (s *Servidor) registrarComPeer(ctx context.Context, peerAddr string) {
 	ticker := time.NewTicker(5 * time.Second) // Tenta a cada 5 segundos
 	defer ticker.Stop()
+
+	log.Printf("[Cluster] Iniciando rotina de registro para o peer %s...", peerAddr)
 
 	for {
 		select {
 		case <-ticker.C:
-			log.Printf("[Cluster] Tentando registrar com o peer %s...", peerAddr)
+			// Tenta registrar
 			if s.enviarRegistro(peerAddr) {
 				log.Printf("[Cluster] Registro com %s bem-sucedido!", peerAddr)
-				return // Sucesso, para de tentar
+				return // Sucesso, a goroutine termina aqui.
 			}
 			log.Printf("[Cluster] Falha ao registrar com %s, tentando novamente...", peerAddr)
+
+		case <-ctx.Done():
+			// Recebeu o sinal de cancelamento do programa principal.
+			log.Printf("[Cluster] Rotina de registro para %s cancelada.", peerAddr)
+			return // A goroutine termina aqui.
 		}
 	}
 }
