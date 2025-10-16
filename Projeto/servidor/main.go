@@ -1108,11 +1108,9 @@ func (s *Servidor) descobrirServidores() {
 				continue
 			}
 
-			if addr != s.MeuEndereco && time.Since(servidor.UltimoPing) > 15*time.Second {
-				if servidor.Ativo { // Loga apenas na primeira vez que se torna inativo
-					servidor.Ativo = false
-					log.Printf("Servidor %s marcado como inativo", addr)
-				}
+			if addr != s.MeuEndereco && time.Since(servidor.UltimoPing) > 15*time.Second && servidor.Ativo {
+				servidor.Ativo = false
+				log.Printf("Servidor %s marcado como inativo", addr)
 			}
 		}
 		s.mutexServidores.Unlock()
