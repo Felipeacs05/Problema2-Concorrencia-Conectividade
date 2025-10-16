@@ -368,15 +368,38 @@ func (s *Servidor) iniciarAPI() {
 
 // Handlers de descoberta
 func (s *Servidor) handleRegister(c *gin.Context) {
-	var novoServidor InfoServidor
-	if err := c.ShouldBindJSON(&novoServidor); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	// Lê o body cru para suportar casos onde o campo pode ser `id` por compatibilidade
+	body, err := c.GetRawData()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "falha ao ler body"})
 		return
 	}
 
-	s.mutexServidores.Lock()
+	var novoServidor InfoServidor
+	// Tenta decodificar diretamente
+	if err := json.Unmarshal(body, &novoServidor); err != nil {
+		// Tenta decodificar como mapa e extrair possíveis campos alternativos
+		var alt map[string]interface{}
+		if err2 := json.Unmarshal(body, &alt); err2 == nil {
+			if v, ok := alt["endereco"].(string); ok && strings.TrimSpace(v) != "" {
+				novoServidor.Endereco = strings.TrimSpace(v)
+			} else if v, ok := alt["id"].(string); ok && strings.TrimSpace(v) != "" {
+				// Compatibilidade com payloads que usam `id` em vez de `endereco`
+				novoServidor.Endereco = strings.TrimSpace(v)
+			}
+		}
+	}
+
+	if strings.TrimSpace(novoServidor.Endereco) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "campo 'endereco' obrigatório"})
+		return
+	}
+
+	// Atualiza metadados
 	novoServidor.UltimoPing = time.Now()
 	novoServidor.Ativo = true
+
+	s.mutexServidores.Lock()
 	s.Servidores[novoServidor.Endereco] = &novoServidor
 	s.mutexServidores.Unlock()
 
@@ -395,7 +418,17 @@ func (s *Servidor) handleHeartbeat(c *gin.Context) {
 		return
 	}
 
-	endereco := dados["endereco"].(string)
+	// Validação segura do campo 'endereco'
+	enderecoRaw, ok := dados["endereco"]
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "campo 'endereco' obrigatório"})
+		return
+	}
+	endereco, ok := enderecoRaw.(string)
+	if !ok || strings.TrimSpace(endereco) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "campo 'endereco' inválido"})
+		return
+	}
 
 	s.mutexServidores.Lock()
 	if servidor, existe := s.Servidores[endereco]; existe {
@@ -1025,6 +1058,12 @@ func (s *Servidor) descobrirServidores() {
 	for range ticker.C {
 		s.mutexServidores.Lock()
 		for addr, servidor := range s.Servidores {
+			// Remove entradas inválidas (chave vazia) que possam ter sido criadas por payloads malformados
+			if strings.TrimSpace(addr) == "" {
+				delete(s.Servidores, addr)
+				continue
+			}
+
 			if addr != s.MeuEndereco && time.Since(servidor.UltimoPing) > 15*time.Second {
 				servidor.Ativo = false
 				log.Printf("Servidor %s marcado como inativo", addr)
