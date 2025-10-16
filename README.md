@@ -77,6 +77,12 @@ go run main.go
 
 ## 🔧 Comandos de Gerenciamento
 
+### Testar EndPoint Aleatório
+```bash
+# Registro do server2 no server1
+curl -X POST -H "Content-Type: application/json" -d '{"id":"servidor2:8081"}' http://localhost:8080/register
+```
+
 ### Ver logs dos servidores
 ```bash
 # Todos os servidores
