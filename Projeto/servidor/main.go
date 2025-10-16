@@ -231,12 +231,22 @@ func (s *Servidor) handleInfoRequest(client mqtt.Client, msg mqtt.Message) {
 	s.publicarParaCliente(clientID, responseMsg)
 }
 func (s *Servidor) handleClienteLogin(client mqtt.Client, msg mqtt.Message) {
+	// EXTRAI O ID TEMPORÁRIO DO CLIENTE DO TÓPICO
+	// Tópico vem como: clientes/{tempID}/login
+	parts := strings.Split(msg.Topic(), "/")
+	if len(parts) < 3 {
+		log.Printf("Tópico de login inválido: %s", msg.Topic())
+		return
+	}
+	tempClientID := parts[1] // Pega o ID temporário
+
 	var dados protocolo.DadosLogin
 	if err := json.Unmarshal(msg.Payload(), &dados); err != nil {
 		log.Printf("Erro ao decodificar login: %v", err)
 		return
 	}
 
+	// GERA O ID PERMANENTE DO CLIENTE
 	clienteID := uuid.New().String()
 	novoCliente := &Cliente{
 		ID:         clienteID,
@@ -248,14 +258,16 @@ func (s *Servidor) handleClienteLogin(client mqtt.Client, msg mqtt.Message) {
 	s.Clientes[clienteID] = novoCliente
 	s.mutexClientes.Unlock()
 
-	log.Printf("Cliente %s (%s) conectado", dados.Nome, clienteID)
+	log.Printf("Cliente %s (ID permanente: %s) conectado", dados.Nome, clienteID)
 
-	// Envia confirmação
+	// ENVIA A CONFIRMAÇÃO DE VOLTA PARA O TÓPICO TEMPORÁRIO
 	resposta := protocolo.Mensagem{
 		Comando: "LOGIN_OK",
 		Dados:   mustJSON(map[string]string{"cliente_id": clienteID, "servidor": s.MeuEndereco}),
 	}
-	s.publicarParaCliente(clienteID, resposta)
+
+	// Usa a função publicarParaCliente, mas com o ID temporário
+	s.publicarParaCliente(tempClientID, resposta)
 }
 
 func (s *Servidor) handleClienteEntrarFila(client mqtt.Client, msg mqtt.Message) {

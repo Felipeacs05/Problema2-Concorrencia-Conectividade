@@ -117,7 +117,7 @@ func conectarMQTT(broker string) error {
 }
 
 func fazerLogin() error {
-	// Cria um canal para esperar a resposta do login
+	// Cria um canal para esperar a resposta do login de forma segura
 	loginResponseChan := make(chan protocolo.Mensagem)
 
 	// Gera um ID temporário único para esta sessão de login
@@ -128,7 +128,7 @@ func fazerLogin() error {
 	if token := mqttClient.Subscribe(responseTopic, 1, func(c mqtt.Client, m mqtt.Message) {
 		var msg protocolo.Mensagem
 		if err := json.Unmarshal(m.Payload(), &msg); err == nil {
-			loginResponseChan <- msg
+			loginResponseChan <- msg // Envia a resposta recebida para o canal
 		}
 	}); token.Wait() && token.Error() != nil {
 		return fmt.Errorf("falha ao se inscrever no tópico de resposta: %v", token.Error())
@@ -138,7 +138,8 @@ func fazerLogin() error {
 	dadosLogin := protocolo.DadosLogin{Nome: meuNome}
 	msgLogin := protocolo.Mensagem{Comando: "LOGIN", Dados: mustJSON(dadosLogin)}
 	payloadLogin, _ := json.Marshal(msgLogin)
-	// O tópico de login agora inclui o ID temporário para o servidor saber para onde responder
+
+	// O tópico de login agora inclui o ID temporário
 	loginTopic := fmt.Sprintf("clientes/%s/login", tempID)
 	mqttClient.Publish(loginTopic, 1, false, payloadLogin)
 
@@ -159,10 +160,11 @@ func fazerLogin() error {
 			return nil
 		}
 		return fmt.Errorf("resposta de login inesperada: %s", resp.Comando)
-	case <-time.After(5 * time.Second):
+	case <-time.After(5 * time.Second): // Espera por 5 segundos
 		return fmt.Errorf("não foi possível obter ID do servidor (timeout)")
 	}
 }
+
 func entrarNaFila() {
 	dados := map[string]string{"cliente_id": meuID}
 	payload, _ := json.Marshal(dados)
