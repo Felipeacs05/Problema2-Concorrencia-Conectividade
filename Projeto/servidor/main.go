@@ -1064,7 +1064,7 @@ func (s *Servidor) descobrirServidores() {
 				continue
 			}
 
-			if addr != s.MeuEndereco && time.Since(servidor.UltimoPing) > 15*time.Second {
+			if addr != s.MeuEndereco && time.Since(servidor.UltimoPing) > 15*time.Second && servidor.Ativo {
 				servidor.Ativo = false
 				log.Printf("Servidor %s marcado como inativo", addr)
 			}
