@@ -46,7 +46,7 @@ func main() {
 	fmt.Println("\nEscolha o servidor para conectar:")
 	fmt.Println("1. Servidor 1")
 	fmt.Println("2. Servidor 2")
-	fmt.Println("3. Servidor 3")
+	fmt.Println("3. Servidor 3") //asdad
 	fmt.Print("Opção: ")
 	scanner.Scan()
 	opcaoStr := scanner.Text()
