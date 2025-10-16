@@ -1,4 +1,3 @@
-
 services:
   # ==================== BROKERS MQTT ====================
   broker1:
@@ -36,9 +35,8 @@ services:
       - broker3_log:/mosquitto/log
     networks:
       - game_network
+
   # ==================== SERVIDORES DE JOGO ====================
-  
-  # Servidor 1
   servidor1:
     build:
       context: .
@@ -48,22 +46,14 @@ services:
     ports:
       - "8080:8080"
     depends_on:
-      broker1:
-        condition: service_started
+      - broker1
     networks:
       - game_network
     restart: unless-stopped
     environment:
-      - GO_ENV=production
+      - SERVER_ID=servidor1 # <-- A ETIQUETA QUE FALTAVA
       - PEERS=servidor1:8080,servidor2:8080,servidor3:8080
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "8080"]
-      interval: 15s
-      timeout: 10s
-      retries: 5
-      start_period: 40s
 
-  # Servidor 2
   servidor2:
     build:
       context: .
@@ -73,22 +63,14 @@ services:
     ports:
       - "8081:8080"
     depends_on:
-      broker2:
-        condition: service_started
+      - broker2
     networks:
       - game_network
     restart: unless-stopped
     environment:
-      - GO_ENV=production
+      - SERVER_ID=servidor2 # <-- A ETIQUETA QUE FALTAVA
       - PEERS=servidor1:8080,servidor2:8080,servidor3:8080
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "8080"]
-      interval: 15s
-      timeout: 10s
-      retries: 5
-      start_period: 40s
 
-  # Servidor 3
   servidor3:
     build:
       context: .
@@ -98,25 +80,15 @@ services:
     ports:
       - "8082:8080"
     depends_on:
-      broker3:
-        condition: service_started
+      - broker3
     networks:
       - game_network
     restart: unless-stopped
     environment:
-      - GO_ENV=production
+      - SERVER_ID=servidor3 # <-- A ETIQUETA QUE FALTAVA
       - PEERS=servidor1:8080,servidor2:8080,servidor3:8080
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "8080"]
-      interval: 15s
-      timeout: 10s
-      retries: 5
-      start_period: 40s
 
   # ==================== CLIENTES (OPCIONAL PARA TESTES) ====================
-  
-  # Cliente de exemplo - pode ser executado manualmente
-  # Para executar: docker-compose run --rm cliente
   cliente:
     build:
       context: .
@@ -130,8 +102,6 @@ services:
       - servidor3
     networks:
       - game_network
-    profiles:
-      - cliente  # Use: docker-compose --profile cliente up
 
 # ==================== VOLUMES ====================
 volumes:
@@ -146,7 +116,3 @@ volumes:
 networks:
   game_network:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.25.0.0/16
-
