@@ -20,7 +20,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
-
+//Servidor ta ok :))
 // ==================== CONFIGURAÇÃO E CONSTANTES ====================
 
 const (
