@@ -4,6 +4,19 @@ Sistema de jogo de cartas multiplayer com arquitetura distribuída e tolerante a
 
 ## 🚀 Como Rodar (Modo Simples)
 
+### ⚠️ Importante: Antes de Começar (Limpeza do Docker)
+Para evitar erros comuns como address already in use (porta já em uso), é altamente recomendado limpar o ambiente Docker antes de iniciar os contêineres.
+
+Execute o seguinte comando no diretório do projeto para parar e remover contêineres, redes e volumes de execuções anteriores:
+```bash
+docker compose down -v
+```
+
+Se o problema persistir, um comando mais agressivo para parar todos os contêineres em execução na sua máquina é:
+```
+docker stop $(docker ps -a -q)
+```
+
 ### 1. Iniciar Tudo de Uma Vez
 ```bash
 # No diretório do projeto

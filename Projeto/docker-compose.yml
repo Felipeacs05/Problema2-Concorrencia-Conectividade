@@ -10,7 +10,7 @@ services:
       - ./mosquitto/config:/mosquitto/config
       - broker1_data:/mosquitto/data
       - broker1_log:/mosquitto/log
-    networks: # <-- ADICIONE ESTAS DUAS LINHAS
+    networks:
       - game_network
 
   broker2:
@@ -22,7 +22,7 @@ services:
       - ./mosquitto/config:/mosquitto/config
       - broker2_data:/mosquitto/data
       - broker2_log:/mosquitto/log
-    networks: # <-- ADICIONE ESTAS DUAS LINHAS
+    networks:
       - game_network
 
   broker3:
@@ -34,7 +34,7 @@ services:
       - ./mosquitto/config:/mosquitto/config
       - broker3_data:/mosquitto/data
       - broker3_log:/mosquitto/log
-    networks: # <-- ADICIONE ESTAS DUAS LINHAS
+    networks:
       - game_network
   # ==================== SERVIDORES DE JOGO ====================
   
