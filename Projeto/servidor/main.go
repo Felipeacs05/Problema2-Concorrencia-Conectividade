@@ -231,6 +231,7 @@ func (s *Servidor) handleInfoRequest(client mqtt.Client, msg mqtt.Message) {
 	// Publica a resposta no tópico de eventos privados do cliente
 	s.publicarParaCliente(clientID, responseMsg)
 }
+
 func (s *Servidor) handleClienteLogin(client mqtt.Client, msg mqtt.Message) {
 	// EXTRAI O ID TEMPORÁRIO DO CLIENTE DO TÓPICO
 	// Tópico vem como: clientes/{tempID}/login
@@ -407,6 +408,7 @@ func (s *Servidor) iniciarAPI() {
 	router.POST("/partida/encaminhar_comando", s.handleEncaminharComando)
 	router.POST("/partida/sincronizar_estado", s.handleSincronizarEstado)
 	router.POST("/partida/notificar_jogador", s.handleNotificarJogador)
+	router.POST("/partida/atualizar_estado", s.handleAtualizarEstado)
 
 	// Rotas de matchmaking global
 	router.POST("/matchmaking/solicitar_oponente", s.handleSolicitarOponente)
@@ -782,6 +784,29 @@ func (s *Servidor) handleNotificarJogador(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "notificado"})
 }
 
+// handleAtualizarEstado é chamado pelo Host para notificar a Sombra sobre uma mudança no jogo.
+func (s *Servidor) handleAtualizarEstado(c *gin.Context) {
+	var msg protocolo.Mensagem
+	if err := c.ShouldBindJSON(&msg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "dados inválidos"})
+		return
+	}
+
+	// Extrai o salaID do payload, pois a Sombra precisa saber para qual sala é o evento
+	var dadosComSala struct {
+		SalaID string `json:"sala_id"`
+	}
+	if err := json.Unmarshal(msg.Dados, &dadosComSala); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "sala_id faltando nos dados"})
+		return
+	}
+
+	// Retransmite o evento para o tópico da partida
+	s.publicarEventoPartida(dadosComSala.SalaID, msg)
+
+	c.JSON(http.StatusOK, gin.H{"status": "evento retransmitido"})
+}
+
 // ==================== HANDLERS DE MATCHMAKING GLOBAL ====================
 
 // handleSolicitarOponente é chamado por outro servidor procurando um oponente.
@@ -834,7 +859,7 @@ func (s *Servidor) handleSolicitarOponente(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"partida_encontrada": true,
 			"sala_id":            salaID,
-			"oponente_nome":      oponenteLocal.Nome,
+			"oponente_nome":      req.SolicitanteNome,
 			"servidor_host":      s.MeuEndereco,
 		})
 
@@ -843,8 +868,8 @@ func (s *Servidor) handleSolicitarOponente(c *gin.Context) {
 			Comando: "PARTIDA_ENCONTRADA",
 			Dados: mustJSON(protocolo.DadosPartidaEncontrada{
 				SalaID:       salaID,
-				OponenteID:   oponenteLocal.ID, // Adiciona o ID do oponente
-				OponenteNome: oponenteLocal.Nome,
+				OponenteID:   req.SolicitanteID,
+				OponenteNome: req.SolicitanteNome,
 			}),
 		})
 
@@ -893,6 +918,16 @@ func (s *Servidor) handleConfirmarPartida(c *gin.Context) {
 	sala.Jogadores = append(sala.Jogadores, jogadorRemoto)
 	sala.Estado = "AGUARDANDO_COMPRA"
 	sala.mutex.Unlock()
+
+	// Notifica o jogador local sobre o oponente remoto
+	s.notificarJogadorRemoto(sala.ServidorSombra, jogadorRemoto.ID, protocolo.Mensagem{
+		Comando: "PARTIDA_ENCONTRADA",
+		Dados: mustJSON(protocolo.DadosPartidaEncontrada{
+			SalaID:       sala.ID,
+			OponenteID:   sala.Jogadores[0].ID,
+			OponenteNome: sala.Jogadores[0].Nome,
+		}),
+	})
 
 	log.Printf("[MATCHMAKING-CONFIRM] Jogador remoto %s adicionado à sala %s. A partida pode começar.", req.SolicitanteNome, req.SalaID)
 
@@ -1195,6 +1230,15 @@ func (s *Servidor) enviarRegistro(peerAddr string) bool {
 
 // ==================== GERENCIAMENTO DE ESTOQUE ====================
 
+func randomString(length int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, length)
+	for i := range b {
+		b[i] = charset[rand.Intn(len(charset))]
+	}
+	return string(b)
+}
+
 func (s *Servidor) inicializarEstoque() {
 	s.mutexEstoque.Lock()
 	defer s.mutexEstoque.Unlock()
@@ -1217,7 +1261,7 @@ func (s *Servidor) inicializarEstoque() {
 		// Comuns: 100 por tipo
 		for i := 0; i < 100; i++ {
 			s.Estoque["C"] = append(s.Estoque["C"], Carta{
-				ID:       uuid.New().String(),
+				ID:       randomString(5),
 				Nome:     nome,
 				Naipe:    naipes[rand.Intn(len(naipes))],
 				Valor:    1 + rand.Intn(50),
@@ -1228,7 +1272,7 @@ func (s *Servidor) inicializarEstoque() {
 		// Incomuns: 50 por tipo
 		for i := 0; i < 50; i++ {
 			s.Estoque["U"] = append(s.Estoque["U"], Carta{
-				ID:       uuid.New().String(),
+				ID:       randomString(5),
 				Nome:     nome,
 				Naipe:    naipes[rand.Intn(len(naipes))],
 				Valor:    51 + rand.Intn(30),
@@ -1239,7 +1283,7 @@ func (s *Servidor) inicializarEstoque() {
 		// Raras: 20 por tipo
 		for i := 0; i < 20; i++ {
 			s.Estoque["R"] = append(s.Estoque["R"], Carta{
-				ID:       uuid.New().String(),
+				ID:       randomString(5),
 				Nome:     nome,
 				Naipe:    naipes[rand.Intn(len(naipes))],
 				Valor:    81 + rand.Intn(20),
@@ -1250,7 +1294,7 @@ func (s *Servidor) inicializarEstoque() {
 		// Lendárias: 5 por tipo
 		for i := 0; i < 5; i++ {
 			s.Estoque["L"] = append(s.Estoque["L"], Carta{
-				ID:       uuid.New().String(),
+				ID:       randomString(5),
 				Nome:     nome,
 				Naipe:    naipes[rand.Intn(len(naipes))],
 				Valor:    101 + rand.Intn(20),
@@ -1316,7 +1360,7 @@ func (s *Servidor) gerarCartaComum() Carta {
 	naipes := []string{"♠", "♥", "♦", "♣"}
 
 	return Carta{
-		ID:       uuid.New().String(),
+		ID:       randomString(5),
 		Nome:     nomes[rand.Intn(len(nomes))],
 		Naipe:    naipes[rand.Intn(len(naipes))],
 		Valor:    1 + rand.Intn(50),
@@ -1862,10 +1906,14 @@ func (s *Servidor) notificarAguardandoOponente(sala *Sala) {
 			MensagemDoTurno: "Aguardando oponente jogar...",
 			NumeroRodada:    sala.NumeroRodada,
 			UltimaJogada:    make(map[string]Carta), // Esconde cartas até ambos jogarem
+			SalaID:          sala.ID,                // Inclui o SalaID para a Sombra
 		}),
 	}
 
 	s.publicarEventoPartida(sala.ID, msg)
+	if sala.ServidorSombra != "" {
+		s.enviarAtualizacaoParaSombra(sala.ServidorSombra, msg)
+	}
 }
 
 // notificarResultadoJogada notifica o resultado de uma jogada
@@ -1888,10 +1936,14 @@ func (s *Servidor) notificarResultadoJogada(sala *Sala, vencedorJogada string) {
 			VencedorJogada:  vencedorJogada,
 			PontosRodada:    sala.PontosRodada,
 			PontosPartida:   sala.PontosPartida,
+			SalaID:          sala.ID, // Inclui o SalaID para a Sombra
 		}),
 	}
 
 	s.publicarEventoPartida(sala.ID, msg)
+	if sala.ServidorSombra != "" {
+		s.enviarAtualizacaoParaSombra(sala.ServidorSombra, msg)
+	}
 }
 
 // finalizarPartida finaliza uma partida e determina o vencedor
@@ -1914,10 +1966,13 @@ func (s *Servidor) finalizarPartida(sala *Sala) {
 
 	msg := protocolo.Mensagem{
 		Comando: "FIM_DE_JOGO",
-		Dados:   mustJSON(protocolo.DadosFimDeJogo{VencedorNome: vencedorFinal}),
+		Dados:   mustJSON(protocolo.DadosFimDeJogo{VencedorNome: vencedorFinal, SalaID: sala.ID}),
 	}
 
 	s.publicarEventoPartida(sala.ID, msg)
+	if sala.ServidorSombra != "" {
+		s.enviarAtualizacaoParaSombra(sala.ServidorSombra, msg)
+	}
 }
 
 // sincronizarEstadoComSombra envia o estado atualizado da partida para a Sombra
@@ -1934,6 +1989,23 @@ func (s *Servidor) sincronizarEstadoComSombra(sombra string, estado *EstadoParti
 
 	if resp.StatusCode == http.StatusOK {
 		log.Printf("Estado sincronizado com sucesso com Sombra %s", sombra)
+	}
+}
+
+func (s *Servidor) enviarAtualizacaoParaSombra(sombraAddr string, msg protocolo.Mensagem) {
+	log.Printf("[SYNC] Enviando atualização de jogo para a sombra %s", sombraAddr)
+	jsonData, _ := json.Marshal(msg)
+	url := fmt.Sprintf("http://%s/partida/atualizar_estado", sombraAddr)
+
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Printf("Erro ao enviar atualização para a sombra %s: %v", sombraAddr, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Sombra %s retornou status %d ao receber atualização.", sombraAddr, resp.StatusCode)
 	}
 }
 

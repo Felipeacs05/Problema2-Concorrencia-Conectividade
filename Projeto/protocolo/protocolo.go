@@ -87,11 +87,13 @@ type DadosAtualizacaoJogo struct {
 	NumeroRodada    int              `json:"numeroRodada"`    // Número da rodada atual (1, 2, 3...)
 	PontosRodada    map[string]int   `json:"pontosRodada"`    // nome -> pontos na rodada atual
 	PontosPartida   map[string]int   `json:"pontosPartida"`   // nome -> rodadas ganhas na partida
+	SalaID          string           `json:"sala_id"`         // ID da sala para roteamento na sombra
 }
 
 // Notificação de fim de partida
 type DadosFimDeJogo struct {
 	VencedorNome string `json:"vencedorNome"` // Nome do vencedor final / "EMPATE" em caso de empate
+	SalaID       string `json:"sala_id"`      // ID da sala para roteamento na sombra
 }
 
 // Comando representa uma ação de um jogador em uma partida
