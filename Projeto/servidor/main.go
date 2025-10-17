@@ -20,6 +20,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
+
 //Servidor ta ok :))
 // ==================== CONFIGURAÇÃO E CONSTANTES ====================
 
@@ -1578,7 +1579,7 @@ func (s *Servidor) processarCompraPacote(clienteID string, sala *Sala) {
 	} else {
 		// Faz requisição HTTP para o líder
 		dados := map[string]interface{}{
-			"quantidade": 1,
+			"cliente_id": clienteID,
 		}
 		jsonData, _ := json.Marshal(dados)
 		url := fmt.Sprintf("http://%s/estoque/comprar_pacote", lider)
@@ -1590,13 +1591,15 @@ func (s *Servidor) processarCompraPacote(clienteID string, sala *Sala) {
 		}
 		defer resp.Body.Close()
 
-		var resultado protocolo.ComprarPacoteResp
+		var resultado struct {
+			Pacote []Carta `json:"pacote"`
+		}
 		if err := json.NewDecoder(resp.Body).Decode(&resultado); err != nil {
-			log.Printf("Erro ao decodificar resposta: %v", err)
+			log.Printf("Erro ao decodificar resposta do líder: %v", err)
 			return
 		}
 
-		cartas = resultado.Cartas
+		cartas = resultado.Pacote
 	}
 
 	// Adiciona cartas ao inventário do cliente
