@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -28,6 +31,8 @@ const (
 	ELEICAO_TIMEOUT     = 10 * time.Second
 	HEARTBEAT_INTERVALO = 3 * time.Second
 	PACOTE_SIZE         = 5
+	JWT_SECRET          = "jogo_distribuido_secret_key_2025" // Chave secreta compartilhada entre servidores
+	JWT_EXPIRATION      = 24 * time.Hour                     // Tokens expiram em 24 horas
 )
 
 // ==================== TIPOS ====================
@@ -60,9 +65,22 @@ type Sala struct {
 	PontosPartida  map[string]int
 	NumeroRodada   int
 	Prontos        map[string]bool
-	ServidorHost   string // Servidor responsável pela lógica da partida
-	ServidorSombra string // Servidor backup
+	ServidorHost   string      // Servidor responsável pela lógica da partida
+	ServidorSombra string      // Servidor backup
+	EventSeq       int64       // Sequência de eventos para ordenação
+	EventLog       []GameEvent // Log append-only de eventos da partida
 	mutex          sync.Mutex
+}
+
+// GameEvent representa um evento no log da partida
+type GameEvent struct {
+	EventSeq  int64       `json:"eventSeq"`  // Número sequencial do evento
+	MatchID   string      `json:"matchId"`   // ID da partida
+	Timestamp time.Time   `json:"timestamp"` // Quando o evento ocorreu
+	EventType string      `json:"eventType"` // Tipo do evento (CARD_PLAYED, ROUND_END, etc.)
+	PlayerID  string      `json:"playerId"`  // ID do jogador que gerou o evento
+	Data      interface{} `json:"data"`      // Dados específicos do evento
+	Signature string      `json:"signature"` // Assinatura HMAC do evento
 }
 
 // EstadoPartida representa o estado completo de uma partida (para replicação)
@@ -74,6 +92,45 @@ type EstadoPartida struct {
 	PontosPartida map[string]int   `json:"pontos_partida"`
 	NumeroRodada  int              `json:"numero_rodada"`
 	Prontos       map[string]bool  `json:"prontos"`
+	EventSeq      int64            `json:"eventSeq"` // Sequência de eventos
+	EventLog      []GameEvent      `json:"eventLog"` // Log de eventos
+}
+
+// Estruturas para os novos endpoints REST
+
+// GameStartRequest representa a requisição para iniciar uma partida
+type GameStartRequest struct {
+	MatchID    string   `json:"matchId"`    // ID único da partida
+	HostServer string   `json:"hostServer"` // Servidor Host
+	Players    []Player `json:"players"`    // Lista de jogadores
+	Token      string   `json:"token"`      // Token JWT para autenticação
+}
+
+// Player representa um jogador na partida
+type Player struct {
+	ID     string `json:"id"`     // ID do jogador
+	Nome   string `json:"nome"`   // Nome do jogador
+	Server string `json:"server"` // Servidor ao qual o jogador está conectado
+}
+
+// GameEventRequest representa um evento de jogo
+type GameEventRequest struct {
+	MatchID   string      `json:"matchId"`   // ID da partida
+	EventSeq  int64       `json:"eventSeq"`  // Número sequencial do evento
+	EventType string      `json:"eventType"` // Tipo do evento
+	PlayerID  string      `json:"playerId"`  // ID do jogador
+	Data      interface{} `json:"data"`      // Dados do evento
+	Token     string      `json:"token"`     // Token JWT
+	Signature string      `json:"signature"` // Assinatura HMAC
+}
+
+// GameReplicateRequest representa uma replicação de estado
+type GameReplicateRequest struct {
+	MatchID   string        `json:"matchId"`   // ID da partida
+	EventSeq  int64         `json:"eventSeq"`  // Sequência do evento
+	State     EstadoPartida `json:"state"`     // Estado completo
+	Token     string        `json:"token"`     // Token JWT
+	Signature string        `json:"signature"` // Assinatura HMAC
 }
 
 // Servidor é a estrutura principal que gerencia o servidor distribuído
@@ -385,34 +442,144 @@ func (s *Servidor) publicarEventoPartida(salaID string, msg protocolo.Mensagem) 
 	s.MQTTClient.Publish(topico, 0, false, payload)
 }
 
+// ==================== SEGURANÇA: JWT E ASSINATURAS ====================
+
+// generateJWT gera um token JWT para autenticação entre servidores
+func generateJWT(serverID string) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+
+	payload := map[string]interface{}{
+		"server_id": serverID,
+		"exp":       time.Now().Add(JWT_EXPIRATION).Unix(),
+		"iat":       time.Now().Unix(),
+	}
+	payloadJSON, _ := json.Marshal(payload)
+	payloadB64 := base64.RawURLEncoding.EncodeToString(payloadJSON)
+
+	message := header + "." + payloadB64
+	signature := generateHMAC(message, JWT_SECRET)
+
+	return message + "." + signature
+}
+
+// validateJWT valida um token JWT
+func validateJWT(token string) (string, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return "", fmt.Errorf("token inválido")
+	}
+
+	message := parts[0] + "." + parts[1]
+	expectedSig := generateHMAC(message, JWT_SECRET)
+
+	if parts[2] != expectedSig {
+		return "", fmt.Errorf("assinatura inválida")
+	}
+
+	payloadJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", fmt.Errorf("payload inválido")
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
+		return "", fmt.Errorf("payload JSON inválido")
+	}
+
+	exp, ok := payload["exp"].(float64)
+	if !ok || time.Now().Unix() > int64(exp) {
+		return "", fmt.Errorf("token expirado")
+	}
+
+	serverID, ok := payload["server_id"].(string)
+	if !ok {
+		return "", fmt.Errorf("server_id ausente")
+	}
+
+	return serverID, nil
+}
+
+// generateHMAC gera uma assinatura HMAC-SHA256
+func generateHMAC(message, secret string) string {
+	h := hmac.New(sha256.New, []byte(secret))
+	h.Write([]byte(message))
+	return base64.RawURLEncoding.EncodeToString(h.Sum(nil))
+}
+
+// signEvent assina um evento de jogo
+func signEvent(event *GameEvent) {
+	data := fmt.Sprintf("%d:%s:%s:%s", event.EventSeq, event.MatchID, event.EventType, event.PlayerID)
+	event.Signature = generateHMAC(data, JWT_SECRET)
+}
+
+// verifyEventSignature verifica a assinatura de um evento
+func verifyEventSignature(event *GameEvent) bool {
+	data := fmt.Sprintf("%d:%s:%s:%s", event.EventSeq, event.MatchID, event.EventType, event.PlayerID)
+	expectedSig := generateHMAC(data, JWT_SECRET)
+	return event.Signature == expectedSig
+}
+
+// authMiddleware middleware para validar JWT em requisições REST
+func authMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		authHeader := c.GetHeader("Authorization")
+		if authHeader == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token de autorização ausente"})
+			c.Abort()
+			return
+		}
+
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+		serverID, err := validateJWT(tokenString)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token inválido: " + err.Error()})
+			c.Abort()
+			return
+		}
+
+		c.Set("server_id", serverID)
+		c.Next()
+	}
+}
+
 // ==================== API REST ====================
 
 func (s *Servidor) iniciarAPI() {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.Default()
 
-	// Rotas de descoberta e heartbeat
+	// Rotas públicas (sem autenticação)
 	router.POST("/register", s.handleRegister)
 	router.POST("/heartbeat", s.handleHeartbeat)
 	router.GET("/servers", s.handleGetServers)
 
-	// Rotas de eleição de líder
+	// Rotas de eleição de líder (sem autenticação para compatibilidade)
 	router.POST("/eleicao/solicitar_voto", s.handleSolicitarVoto)
 	router.POST("/eleicao/declarar_lider", s.handleDeclararLider)
 
-	// Rotas de gerenciamento de estoque (apenas líder)
-	router.POST("/estoque/comprar_pacote", s.handleComprarPacote)
-	router.GET("/estoque/status", s.handleStatusEstoque)
+	// Grupo de rotas autenticadas para comunicação cross-server
+	authenticated := router.Group("/")
+	authenticated.Use(authMiddleware())
+	{
+		// === NOVOS ENDPOINTS PADRÃO ===
+		authenticated.POST("/game/start", s.handleGameStart)
+		authenticated.POST("/game/event", s.handleGameEvent)
+		authenticated.POST("/game/replicate", s.handleGameReplicate)
 
-	// Rotas de sincronização de partidas
-	router.POST("/partida/encaminhar_comando", s.handleEncaminharComando)
-	router.POST("/partida/sincronizar_estado", s.handleSincronizarEstado)
-	router.POST("/partida/notificar_jogador", s.handleNotificarJogador)
-	router.POST("/partida/atualizar_estado", s.handleAtualizarEstado)
+		// Rotas de gerenciamento de estoque (apenas líder)
+		authenticated.POST("/estoque/comprar_pacote", s.handleComprarPacote)
+		authenticated.GET("/estoque/status", s.handleStatusEstoque)
 
-	// Rotas de matchmaking global
-	router.POST("/matchmaking/solicitar_oponente", s.handleSolicitarOponente)
-	router.POST("/matchmaking/confirmar_partida", s.handleConfirmarPartida)
+		// Rotas de sincronização de partidas (mantidas para compatibilidade)
+		authenticated.POST("/partida/encaminhar_comando", s.handleEncaminharComando)
+		authenticated.POST("/partida/sincronizar_estado", s.handleSincronizarEstado)
+		authenticated.POST("/partida/notificar_jogador", s.handleNotificarJogador)
+		authenticated.POST("/partida/atualizar_estado", s.handleAtualizarEstado)
+
+		// Rotas de matchmaking global
+		authenticated.POST("/matchmaking/solicitar_oponente", s.handleSolicitarOponente)
+		authenticated.POST("/matchmaking/confirmar_partida", s.handleConfirmarPartida)
+	}
 
 	log.Printf("API REST iniciada em %s", s.MeuEndereco)
 	if err := router.Run(s.MeuEndereco); err != nil {
@@ -932,6 +1099,295 @@ func (s *Servidor) handleConfirmarPartida(c *gin.Context) {
 	log.Printf("[MATCHMAKING-CONFIRM] Jogador remoto %s adicionado à sala %s. A partida pode começar.", req.SolicitanteNome, req.SalaID)
 
 	c.JSON(http.StatusOK, gin.H{"status": "confirmado"})
+}
+
+// ==================== HANDLERS DOS NOVOS ENDPOINTS PADRÃO ====================
+
+// handleGameStart cria uma nova partida e envia o estado inicial ao servidor shadow
+func (s *Servidor) handleGameStart(c *gin.Context) {
+	var req GameStartRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Requisição inválida: " + err.Error()})
+		return
+	}
+
+	log.Printf("[GAME-START] Iniciando partida %s como Host", req.MatchID)
+
+	// Cria a nova sala
+	novaSala := &Sala{
+		ID:             req.MatchID,
+		Jogadores:      make([]*Cliente, 0),
+		Estado:         "AGUARDANDO_COMPRA",
+		CartasNaMesa:   make(map[string]Carta),
+		PontosRodada:   make(map[string]int),
+		PontosPartida:  make(map[string]int),
+		NumeroRodada:   1,
+		Prontos:        make(map[string]bool),
+		ServidorHost:   req.HostServer,
+		ServidorSombra: "",
+		EventSeq:       0,
+		EventLog:       make([]GameEvent, 0),
+	}
+
+	// Adiciona jogadores à sala
+	for _, player := range req.Players {
+		// Cria ou encontra o cliente
+		s.mutexClientes.Lock()
+		cliente, existe := s.Clientes[player.ID]
+		if !existe {
+			cliente = &Cliente{
+				ID:         player.ID,
+				Nome:       player.Nome,
+				Inventario: make([]Carta, 0),
+				Sala:       novaSala,
+			}
+			s.Clientes[player.ID] = cliente
+		}
+		s.mutexClientes.Unlock()
+
+		novaSala.Jogadores = append(novaSala.Jogadores, cliente)
+
+		// Define o servidor shadow se o jogador está em servidor diferente
+		if player.Server != req.HostServer && novaSala.ServidorSombra == "" {
+			novaSala.ServidorSombra = player.Server
+		}
+	}
+
+	// Registra a sala
+	s.mutexSalas.Lock()
+	s.Salas[req.MatchID] = novaSala
+	s.mutexSalas.Unlock()
+
+	// Cria evento inicial
+	event := GameEvent{
+		EventSeq:  0,
+		MatchID:   req.MatchID,
+		Timestamp: time.Now(),
+		EventType: "MATCH_START",
+		PlayerID:  "SYSTEM",
+		Data: map[string]interface{}{
+			"host":   req.HostServer,
+			"shadow": novaSala.ServidorSombra,
+		},
+	}
+	signEvent(&event)
+	novaSala.EventLog = append(novaSala.EventLog, event)
+
+	log.Printf("[GAME-START] Partida %s criada. Host: %s, Shadow: %s", req.MatchID, req.HostServer, novaSala.ServidorSombra)
+
+	// Se houver shadow, envia o estado inicial
+	if novaSala.ServidorSombra != "" {
+		go s.enviarEstadoInicialParaShadow(novaSala)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "created",
+		"matchId": req.MatchID,
+		"host":    req.HostServer,
+		"shadow":  novaSala.ServidorSombra,
+	})
+}
+
+// handleGameEvent processa eventos de jogo vindos de jogadores remotos (via Shadow)
+func (s *Servidor) handleGameEvent(c *gin.Context) {
+	var req GameEventRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Requisição inválida: " + err.Error()})
+		return
+	}
+
+	log.Printf("[GAME-EVENT] Recebido evento %d do tipo %s da partida %s", req.EventSeq, req.EventType, req.MatchID)
+
+	// Busca a sala
+	s.mutexSalas.RLock()
+	sala, existe := s.Salas[req.MatchID]
+	s.mutexSalas.RUnlock()
+
+	if !existe {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Partida não encontrada"})
+		return
+	}
+
+	// Verifica se este servidor é o Host
+	sala.mutex.Lock()
+	eHost := sala.ServidorHost == s.MeuEndereco
+	eventSeqAtual := sala.EventSeq
+	sala.mutex.Unlock()
+
+	if !eHost {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Este servidor não é o Host da partida"})
+		return
+	}
+
+	// Valida eventSeq para prevenir replay attacks
+	if req.EventSeq <= eventSeqAtual {
+		log.Printf("[GAME-EVENT] AVISO: Evento desatualizado ou duplicado. Esperado > %d, recebido %d", eventSeqAtual, req.EventSeq)
+		c.JSON(http.StatusConflict, gin.H{"error": "Evento desatualizado ou duplicado"})
+		return
+	}
+
+	// Cria o evento
+	event := GameEvent{
+		EventSeq:  req.EventSeq,
+		MatchID:   req.MatchID,
+		Timestamp: time.Now(),
+		EventType: req.EventType,
+		PlayerID:  req.PlayerID,
+		Data:      req.Data,
+	}
+	signEvent(&event)
+
+	// Verifica a assinatura se fornecida
+	if req.Signature != "" && !verifyEventSignature(&event) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Assinatura inválida"})
+		return
+	}
+
+	// Adiciona ao event log
+	sala.mutex.Lock()
+	sala.EventSeq = req.EventSeq
+	sala.EventLog = append(sala.EventLog, event)
+	sala.mutex.Unlock()
+
+	// Processa o evento baseado no tipo
+	var novoEstado *EstadoPartida
+	switch req.EventType {
+	case "CARD_PLAYED":
+		// Extrai dados da jogada
+		dataMap, ok := req.Data.(map[string]interface{})
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Dados do evento inválidos"})
+			return
+		}
+		cartaID, _ := dataMap["carta_id"].(string)
+		novoEstado = s.processarJogadaComoHost(sala, req.PlayerID, cartaID)
+	default:
+		log.Printf("[GAME-EVENT] Tipo de evento não reconhecido: %s", req.EventType)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":   "processed",
+		"eventSeq": req.EventSeq,
+		"state":    novoEstado,
+	})
+}
+
+// handleGameReplicate recebe replicação de estado do Host (quando este servidor é Shadow)
+func (s *Servidor) handleGameReplicate(c *gin.Context) {
+	var req GameReplicateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Requisição inválida: " + err.Error()})
+		return
+	}
+
+	log.Printf("[GAME-REPLICATE] Recebendo replicação da partida %s, eventSeq %d", req.MatchID, req.EventSeq)
+
+	// Busca ou cria a sala
+	s.mutexSalas.Lock()
+	sala, existe := s.Salas[req.MatchID]
+	if !existe {
+		// Cria sala se não existir (recuperação após falha)
+		sala = &Sala{
+			ID:             req.MatchID,
+			Jogadores:      make([]*Cliente, 0),
+			Estado:         req.State.Estado,
+			CartasNaMesa:   req.State.CartasNaMesa,
+			PontosRodada:   req.State.PontosRodada,
+			PontosPartida:  req.State.PontosPartida,
+			NumeroRodada:   req.State.NumeroRodada,
+			Prontos:        req.State.Prontos,
+			ServidorHost:   "",
+			ServidorSombra: s.MeuEndereco,
+			EventSeq:       req.EventSeq,
+			EventLog:       req.State.EventLog,
+		}
+		s.Salas[req.MatchID] = sala
+		log.Printf("[GAME-REPLICATE] Sala %s criada como Shadow", req.MatchID)
+	}
+	s.mutexSalas.Unlock()
+
+	// Atualiza o estado
+	sala.mutex.Lock()
+
+	// Valida eventSeq - só aceita eventos mais recentes
+	if req.EventSeq <= sala.EventSeq {
+		sala.mutex.Unlock()
+		log.Printf("[GAME-REPLICATE] AVISO: Replicação desatualizada. Atual: %d, recebido: %d", sala.EventSeq, req.EventSeq)
+		c.JSON(http.StatusOK, gin.H{"status": "ignored", "reason": "outdated"})
+		return
+	}
+
+	// Atualiza o estado da sala
+	sala.Estado = req.State.Estado
+	sala.CartasNaMesa = req.State.CartasNaMesa
+	sala.PontosRodada = req.State.PontosRodada
+	sala.PontosPartida = req.State.PontosPartida
+	sala.NumeroRodada = req.State.NumeroRodada
+	sala.Prontos = req.State.Prontos
+	sala.EventSeq = req.EventSeq
+
+	// Atualiza event log (merge)
+	if len(req.State.EventLog) > len(sala.EventLog) {
+		sala.EventLog = req.State.EventLog
+	}
+
+	sala.mutex.Unlock()
+
+	log.Printf("[GAME-REPLICATE] Estado da partida %s sincronizado com sucesso", req.MatchID)
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":   "replicated",
+		"eventSeq": req.EventSeq,
+	})
+}
+
+// enviarEstadoInicialParaShadow envia o estado inicial da partida para o servidor Shadow
+func (s *Servidor) enviarEstadoInicialParaShadow(sala *Sala) {
+	if sala.ServidorSombra == "" || sala.ServidorSombra == s.MeuEndereco {
+		return
+	}
+
+	sala.mutex.Lock()
+	estado := EstadoPartida{
+		SalaID:        sala.ID,
+		Estado:        sala.Estado,
+		CartasNaMesa:  sala.CartasNaMesa,
+		PontosRodada:  sala.PontosRodada,
+		PontosPartida: sala.PontosPartida,
+		NumeroRodada:  sala.NumeroRodada,
+		Prontos:       sala.Prontos,
+		EventSeq:      sala.EventSeq,
+		EventLog:      sala.EventLog,
+	}
+	sala.mutex.Unlock()
+
+	req := GameReplicateRequest{
+		MatchID:  sala.ID,
+		EventSeq: estado.EventSeq,
+		State:    estado,
+		Token:    generateJWT(s.ServerID),
+	}
+
+	// Gera assinatura
+	data := fmt.Sprintf("%s:%d", req.MatchID, req.EventSeq)
+	req.Signature = generateHMAC(data, JWT_SECRET)
+
+	jsonData, _ := json.Marshal(req)
+	url := fmt.Sprintf("http://%s/game/replicate", sala.ServidorSombra)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Printf("[GAME-START] Erro ao enviar estado inicial para Shadow %s: %v", sala.ServidorSombra, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		log.Printf("[GAME-START] Estado inicial enviado com sucesso para Shadow %s", sala.ServidorSombra)
+	} else {
+		log.Printf("[GAME-START] Shadow %s retornou status %d", sala.ServidorSombra, resp.StatusCode)
+	}
 }
 
 // ==================== LÓGICA DE ELEIÇÃO DE LÍDER ====================
@@ -1693,26 +2149,47 @@ func (s *Servidor) iniciarPartida(sala *Sala) {
 func (s *Servidor) encaminharJogadaParaHost(sala *Sala, clienteID, cartaID string) {
 	sala.mutex.Lock()
 	host := sala.ServidorHost
+	eventSeq := sala.EventSeq + 1 // Próximo eventSeq
 	sala.mutex.Unlock()
 
-	log.Printf("Encaminhando jogada de %s para o Host %s", clienteID, host)
+	log.Printf("[SHADOW] Encaminhando jogada de %s para o Host %s (eventSeq: %d)", clienteID, host, eventSeq)
 
-	dados := map[string]interface{}{
-		"sala_id":    sala.ID,
-		"comando":    "JOGAR_CARTA",
-		"cliente_id": clienteID,
-		"carta_id":   cartaID,
+	// Usa o novo endpoint /game/event
+	req := GameEventRequest{
+		MatchID:   sala.ID,
+		EventSeq:  eventSeq,
+		EventType: "CARD_PLAYED",
+		PlayerID:  clienteID,
+		Data: map[string]interface{}{
+			"carta_id": cartaID,
+		},
+		Token: generateJWT(s.ServerID),
 	}
 
-	jsonData, _ := json.Marshal(dados)
-	url := fmt.Sprintf("http://%s/partida/encaminhar_comando", host)
+	// Gera assinatura
+	event := GameEvent{
+		EventSeq:  req.EventSeq,
+		MatchID:   req.MatchID,
+		EventType: req.EventType,
+		PlayerID:  req.PlayerID,
+	}
+	signEvent(&event)
+	req.Signature = event.Signature
+
+	jsonData, _ := json.Marshal(req)
+	url := fmt.Sprintf("http://%s/game/event", host)
 
 	// Adiciona timeout para detectar falha do Host
-	client := &http.Client{
+	httpClient := &http.Client{
 		Timeout: 5 * time.Second,
 	}
 
-	resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonData))
+	// Adiciona header de autenticação
+	httpReq, _ := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+req.Token)
+
+	resp, err := httpClient.Do(httpReq)
 	if err != nil {
 		log.Printf("[FAILOVER] Host %s inacessível: %v. Iniciando promoção da Sombra...", host, err)
 		s.promoverSombraAHost(sala)
@@ -1722,11 +2199,11 @@ func (s *Servidor) encaminharJogadaParaHost(sala *Sala, clienteID, cartaID strin
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("Host retornou status %d ao processar jogada", resp.StatusCode)
+		log.Printf("[SHADOW] Host retornou status %d ao processar jogada", resp.StatusCode)
 		return
 	}
 
-	log.Printf("Jogada processada pelo Host com sucesso")
+	log.Printf("[SHADOW] Jogada processada pelo Host com sucesso")
 }
 
 // promoverSombraAHost promove a Sombra a Host quando o Host original falha
@@ -1759,6 +2236,10 @@ func (s *Servidor) processarJogadaComoHost(sala *Sala, clienteID, cartaID string
 	sala.mutex.Lock()
 	defer sala.mutex.Unlock()
 
+	// Incrementa eventSeq
+	sala.EventSeq++
+	currentEventSeq := sala.EventSeq
+
 	// Encontra o cliente
 	var jogador *Cliente
 	var nomeJogador string
@@ -1771,13 +2252,13 @@ func (s *Servidor) processarJogadaComoHost(sala *Sala, clienteID, cartaID string
 	}
 
 	if jogador == nil {
-		log.Printf("Cliente %s não encontrado na sala", clienteID)
+		log.Printf("[HOST] Cliente %s não encontrado na sala", clienteID)
 		return nil
 	}
 
 	// Verifica se já jogou nesta rodada
 	if _, jaJogou := sala.CartasNaMesa[nomeJogador]; jaJogou {
-		log.Printf("Jogador %s já jogou nesta rodada", nomeJogador)
+		log.Printf("[HOST] Jogador %s já jogou nesta rodada", nomeJogador)
 		return nil
 	}
 
@@ -1795,7 +2276,7 @@ func (s *Servidor) processarJogadaComoHost(sala *Sala, clienteID, cartaID string
 
 	if cartaIndex == -1 {
 		jogador.mutex.Unlock()
-		log.Printf("Carta %s não encontrada no inventário de %s", cartaID, nomeJogador)
+		log.Printf("[HOST] Carta %s não encontrada no inventário de %s", cartaID, nomeJogador)
 		return nil
 	}
 
@@ -1806,7 +2287,23 @@ func (s *Servidor) processarJogadaComoHost(sala *Sala, clienteID, cartaID string
 	// Adiciona carta à mesa
 	sala.CartasNaMesa[nomeJogador] = carta
 
-	log.Printf("Jogador %s jogou carta %s (Poder: %d)", nomeJogador, carta.Nome, carta.Valor)
+	// Registra evento no log
+	event := GameEvent{
+		EventSeq:  currentEventSeq,
+		MatchID:   sala.ID,
+		Timestamp: time.Now(),
+		EventType: "CARD_PLAYED",
+		PlayerID:  clienteID,
+		Data: map[string]interface{}{
+			"carta_id":    cartaID,
+			"carta_nome":  carta.Nome,
+			"carta_valor": carta.Valor,
+		},
+	}
+	signEvent(&event)
+	sala.EventLog = append(sala.EventLog, event)
+
+	log.Printf("[HOST] Jogador %s jogou carta %s (Poder: %d) - eventSeq: %d", nomeJogador, carta.Nome, carta.Valor, currentEventSeq)
 
 	// Verifica se ambos jogaram
 	if len(sala.CartasNaMesa) == len(sala.Jogadores) {
@@ -1826,14 +2323,52 @@ func (s *Servidor) processarJogadaComoHost(sala *Sala, clienteID, cartaID string
 		PontosPartida: sala.PontosPartida,
 		NumeroRodada:  sala.NumeroRodada,
 		Prontos:       sala.Prontos,
+		EventSeq:      sala.EventSeq,
+		EventLog:      sala.EventLog,
 	}
 
-	// Sincroniza com a Sombra
+	// Sincroniza com a Sombra usando o novo endpoint
 	if sala.ServidorSombra != "" && sala.ServidorSombra != s.MeuEndereco {
-		go s.sincronizarEstadoComSombra(sala.ServidorSombra, estado)
+		go s.replicarEstadoParaShadow(sala.ServidorSombra, estado)
 	}
 
 	return estado
+}
+
+// replicarEstadoParaShadow replica o estado para o servidor Shadow usando o endpoint /game/replicate
+func (s *Servidor) replicarEstadoParaShadow(shadowAddr string, estado *EstadoPartida) {
+	req := GameReplicateRequest{
+		MatchID:  estado.SalaID,
+		EventSeq: estado.EventSeq,
+		State:    *estado,
+		Token:    generateJWT(s.ServerID),
+	}
+
+	// Gera assinatura
+	data := fmt.Sprintf("%s:%d", req.MatchID, req.EventSeq)
+	req.Signature = generateHMAC(data, JWT_SECRET)
+
+	jsonData, _ := json.Marshal(req)
+	url := fmt.Sprintf("http://%s/game/replicate", shadowAddr)
+
+	httpClient := &http.Client{Timeout: 3 * time.Second}
+
+	httpReq, _ := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+req.Token)
+
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		log.Printf("[HOST] Erro ao replicar estado para Shadow %s: %v", shadowAddr, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		log.Printf("[HOST] Estado replicado com sucesso para Shadow %s (eventSeq: %d)", shadowAddr, estado.EventSeq)
+	} else {
+		log.Printf("[HOST] Shadow %s retornou status %d ao receber replicação", shadowAddr, resp.StatusCode)
+	}
 }
 
 // resolverJogada resolve uma jogada quando ambos os jogadores jogaram
