@@ -546,7 +546,9 @@ func authMiddleware() gin.HandlerFunc {
 
 func (s *Servidor) iniciarAPI() {
 	gin.SetMode(gin.ReleaseMode)
-	router := gin.Default()
+	router := gin.New()        // Usa um router Gin "limpo", sem middlewares padrão
+	router.Use(gin.Recovery()) // Adiciona apenas o middleware essencial de recuperação de pânico
+	// router.Use(gin.Logger()) // Pode descomentar para ver logs detalhados do GIN, se necessário
 
 	// Rotas públicas (sem autenticação)
 	router.POST("/register", s.handleRegister)
@@ -938,15 +940,23 @@ func (s *Servidor) handleNotificarJogador(c *gin.Context) {
 		return
 	}
 
-	clienteID := dados["cliente_id"].(string)
-	mensagemJSON := dados["mensagem"].(map[string]interface{})
+	clienteID := dados["cliente_id"].(string)                  // ID do cliente que deve receber
+	mensagemJSON := dados["mensagem"].(map[string]interface{}) // A mensagem completa
+
+	// Verifica se o cliente está realmente conectado a este servidor
+	if s.getClienteLocal(clienteID) == nil {
+		log.Printf("[RETRANSMISSÃO-ERRO] Recebi pedido para notificar cliente %s, mas ele não está conectado aqui.", clienteID)
+		c.JSON(http.StatusNotFound, gin.H{"error": "Cliente não encontrado neste servidor"})
+		return
+	}
 
 	var msg protocolo.Mensagem
 	msgBytes, _ := json.Marshal(mensagemJSON)
 	json.Unmarshal(msgBytes, &msg)
 
-	// Publica a mensagem para o cliente via MQTT
-	s.publicarParaCliente(clienteID, msg)
+	// Publica a mensagem para o cliente local via MQTT
+	log.Printf("[RETRANSMISSÃO] Retransmitindo evento %s para cliente local %s", msg.Comando, clienteID)
+	s.publicarParaCliente(clienteID, msg) // Usa o broker local
 
 	c.JSON(http.StatusOK, gin.H{"status": "notificado"})
 }
@@ -977,34 +987,48 @@ func (s *Servidor) handleAtualizarEstado(c *gin.Context) {
 // ==================== HANDLERS DE MATCHMAKING GLOBAL ====================
 
 // handleSolicitarOponente é chamado por outro servidor procurando um oponente.
+// handleSolicitarOponente é chamado por outro servidor procurando um oponente.
 func (s *Servidor) handleSolicitarOponente(c *gin.Context) {
+	// --- LOGS DE DEPURACÇÃO ADICIONADOS ---
+	log.Printf("[HANDLE_SOLICITAR_OPONENTE-RX] Recebida requisição de %s", c.Request.RemoteAddr)
+	// --- FIM DOS LOGS DE DEPURACÇÃO ---
+
 	var req struct {
 		SolicitanteID   string `json:"solicitante_id"`
 		SolicitanteNome string `json:"solicitante_nome"`
 		ServidorOrigem  string `json:"servidor_origem"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Printf("[HANDLE_SOLICITAR_OPONENTE-RX] Erro no Bind JSON: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	log.Printf("[MATCHMAKING-RX] Recebida solicitação de oponente de %s@%s", req.SolicitanteNome, req.ServidorOrigem)
 
-	s.mutexFila.Lock()
+	s.mutexFila.Lock() // Bloqueia para modificar a fila
+	// --- LOG DE DEPURACÇÃO ADICIONADO ---
+	tamanhoFilaDepoisLock := len(s.FilaDeEspera)
+	log.Printf("[HANDLE_SOLICITAR_OPONENTE-RX] Tamanho da fila DEPOIS do Lock: %d", tamanhoFilaDepoisLock)
+	// --- FIM DO LOG DE DEPURACÇÃO ---
+
 	if len(s.FilaDeEspera) > 0 {
 		// Oponente encontrado!
 		oponenteLocal := s.FilaDeEspera[0]
 		s.FilaDeEspera = s.FilaDeEspera[1:] // Remove da fila
-		s.mutexFila.Unlock()
+		s.mutexFila.Unlock()                // Desbloqueia AGORA, antes de fazer mais coisas
 
-		log.Printf("[MATCHMAKING-RX] Oponente local %s encontrado para %s@%s", oponenteLocal.Nome, req.SolicitanteNome, req.ServidorOrigem)
+		// --- LOG DE DEPURACÇÃO ADICIONADO ---
+		log.Printf("[HANDLE_SOLICITAR_OPONENTE-MATCH!] Oponente local %s (ID: %s) encontrado para %s@%s. A responder com 'true'.",
+			oponenteLocal.Nome, oponenteLocal.ID, req.SolicitanteNome, req.ServidorOrigem)
+		// --- FIM DO LOG DE DEPURACÇÃO ---
 
 		// Este servidor (que encontrou o oponente) será o Host.
 		salaID := uuid.New().String()
 		novaSala := &Sala{
 			ID:             salaID,
 			Jogadores:      []*Cliente{oponenteLocal}, // Adiciona jogador local
-			Estado:         "AGUARDANDO_JOGADORES",
+			Estado:         "AGUARDANDO_JOGADORES",    // Estado inicial
 			CartasNaMesa:   make(map[string]Carta),
 			PontosRodada:   make(map[string]int),
 			PontosPartida:  make(map[string]int),
@@ -1026,23 +1050,25 @@ func (s *Servidor) handleSolicitarOponente(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"partida_encontrada": true,
 			"sala_id":            salaID,
-			"oponente_nome":      req.SolicitanteNome,
+			"oponente_nome":      oponenteLocal.Nome, // Nome do jogador LOCAL que foi encontrado
 			"servidor_host":      s.MeuEndereco,
 		})
 
-		// Notifica o jogador local
+		// Notifica o jogador local sobre o oponente REMOTO
 		s.publicarParaCliente(oponenteLocal.ID, protocolo.Mensagem{
 			Comando: "PARTIDA_ENCONTRADA",
 			Dados: mustJSON(protocolo.DadosPartidaEncontrada{
 				SalaID:       salaID,
-				OponenteID:   req.SolicitanteID,
-				OponenteNome: req.SolicitanteNome,
+				OponenteID:   req.SolicitanteID,   // ID do jogador remoto
+				OponenteNome: req.SolicitanteNome, // Nome do jogador remoto
 			}),
 		})
 
 	} else {
-		s.mutexFila.Unlock()
-		log.Printf("[MATCHMAKING-RX] Nenhum oponente local na fila para %s@%s", req.SolicitanteNome, req.ServidorOrigem)
+		s.mutexFila.Unlock() // Desbloqueia se não encontrou ninguém
+		// --- LOG DE DEPURACÇÃO ADICIONADO ---
+		log.Printf("[HANDLE_SOLICITAR_OPONENTE-NO_MATCH] Nenhum oponente local na fila para %s@%s. A responder com 'false'.", req.SolicitanteNome, req.ServidorOrigem)
+		// --- FIM DO LOG DE DEPURACÇÃO ---
 		c.JSON(http.StatusOK, gin.H{"partida_encontrada": false})
 	}
 }
@@ -1894,36 +1920,66 @@ func (s *Servidor) entrarFila(cliente *Cliente) {
 		Dados:   mustJSON(map[string]string{"mensagem": "Procurando oponente em todos os servidores..."}),
 	})
 
-	// Dispara a busca por oponente em outros servidores em uma goroutine
-	go s.tentarMatchmakingGlobal(cliente)
+	log.Printf("[MATCHMAKING] Iniciando busca global persistente para %s (%s)", cliente.Nome, cliente.ID)
+	go s.gerenciarBuscaGlobalPersistente(cliente)
 }
 
-// tentarMatchmakingGlobal é a rotina que busca oponentes em outros servidores.
-func (s *Servidor) tentarMatchmakingGlobal(cliente *Cliente) {
-	// Delay para dar chance ao matchmaking local de outros servidores
-	time.Sleep(2 * time.Second)
+// gerenciarBuscaGlobalPersistente tenta encontrar um oponente global periodicamente.
+func (s *Servidor) gerenciarBuscaGlobalPersistente(cliente *Cliente) {
+	ticker := time.NewTicker(5 * time.Second) // Tenta a cada 5 segundos
+	defer ticker.Stop()
 
-	// Garante que o cliente não encontrou uma partida enquanto esperava
-	s.mutexFila.Lock()
-	aindaNaFila := false
-	for i, c := range s.FilaDeEspera {
-		if c.ID == cliente.ID {
-			// Remove temporariamente para não ser encontrado por outro processo
-			s.FilaDeEspera = append(s.FilaDeEspera[:i], s.FilaDeEspera[i+1:]...)
-			aindaNaFila = true
-			break
+	// Cria um contexto para poder cancelar esta goroutine se o cliente sair/for matchado
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // Garante que o cancelamento seja chamado ao sair
+
+	// Armazena a função de cancelamento para uso posterior (ex: quando o cliente for matchado localmente)
+	cliente.mutex.Lock()
+	// Assumindo que você adicione um campo `cancelBuscaGlobal context.CancelFunc` à struct Cliente
+	// cliente.cancelBuscaGlobal = cancel // (Descomente se adicionar o campo)
+	cliente.mutex.Unlock()
+
+	for {
+		select {
+		case <-ticker.C:
+			// 1. Verifica se o cliente AINDA está na fila deste servidor
+			s.mutexFila.Lock()
+			aindaNaFila := false
+			for _, c := range s.FilaDeEspera {
+				if c.ID == cliente.ID {
+					aindaNaFila = true
+					break
+				}
+			}
+			s.mutexFila.Unlock()
+
+			if !aindaNaFila {
+				log.Printf("[MATCHMAKING-PERSIST] Cliente %s (%s) não está mais na fila local. Parando busca global.", cliente.Nome, cliente.ID)
+				return // Cliente já foi matchado (localmente ou por outra tentativa), sai da rotina
+			}
+
+			// 2. Tenta encontrar um oponente global AGORA (sem remover da fila!)
+			log.Printf("[MATCHMAKING-PERSIST] Tentando busca global para %s (%s)", cliente.Nome, cliente.ID)
+			encontrou := s.tentarMatchmakingGlobalAgora(cliente)
+
+			if encontrou {
+				log.Printf("[MATCHMAKING-PERSIST] Busca global para %s (%s) encontrou partida! A busca será finalizada.", cliente.Nome, cliente.ID)
+				// A remoção da fila agora é feita dentro de `realizarSolicitacaoMatchmaking` no momento da confirmação.
+				// Apenas precisamos parar a busca.
+				return // Encontrou, sai da rotina
+			}
+			// Se não encontrou, o loop continua na próxima iteração do ticker.
+
+		case <-ctx.Done():
+			log.Printf("[MATCHMAKING-PERSIST] Busca global para %s (%s) cancelada.", cliente.Nome, cliente.ID)
+			return // Sai da rotina se o contexto for cancelado
 		}
 	}
-	s.mutexFila.Unlock()
+}
 
-	if !aindaNaFila {
-		log.Printf("[MATCHMAKING-TX] Cliente %s já encontrou partida, cancelando busca global.", cliente.Nome)
-		return
-	}
-
-	log.Printf("[MATCHMAKING-TX] Iniciando busca global para %s", cliente.Nome)
-
-	// Busca oponente em outros servidores
+// tentarMatchmakingGlobalAgora faz UMA tentativa de encontrar um oponente global.
+func (s *Servidor) tentarMatchmakingGlobalAgora(cliente *Cliente) bool {
+	// Busca oponente em outros servidores ATIVOS
 	s.mutexServidores.RLock()
 	servidoresAtivos := make([]string, 0, len(s.Servidores))
 	for addr, info := range s.Servidores {
@@ -1933,18 +1989,33 @@ func (s *Servidor) tentarMatchmakingGlobal(cliente *Cliente) {
 	}
 	s.mutexServidores.RUnlock()
 
+	if len(servidoresAtivos) == 0 {
+		// log.Printf("[MATCHMAKING-AGORA] Nenhum outro servidor ativo para buscar oponente para %s.", cliente.Nome)
+		return false // Não há ninguém para perguntar
+	}
+
+	// Embaralha a ordem para não sobrecarregar sempre o mesmo servidor
+	rand.Shuffle(len(servidoresAtivos), func(i, j int) {
+		servidoresAtivos[i], servidoresAtivos[j] = servidoresAtivos[j], servidoresAtivos[i]
+	})
+
 	for _, addr := range servidoresAtivos {
+		// A função realizarSolicitacaoMatchmaking já contém a lógica de:
+		// 1. Enviar POST /matchmaking/solicitar_oponente
+		// 2. Se encontrar (resposta diz partida_encontrada: true):
+		//    - Cria a sala local como Sombra.
+		//    - Associa o cliente à sala.
+		//    - Envia POST /matchmaking/confirmar_partida para o Host.
+		//    - Publica PARTIDA_ENCONTRADA para o cliente local.
+		//    - Retorna true.
+		// 3. Se não encontrar, retorna false.
 		if s.realizarSolicitacaoMatchmaking(addr, cliente) {
-			// Encontrou partida, a função interna já tratou de tudo.
-			return
+			return true // Encontrou partida! A função interna já tratou de tudo.
 		}
 	}
 
-	// Se chegou aqui, não encontrou oponente. Coloca o cliente de volta na fila.
-	log.Printf("[MATCHMAKING-TX] Nenhum oponente encontrado globalmente para %s. Devolvendo à fila.", cliente.Nome)
-	s.mutexFila.Lock()
-	s.FilaDeEspera = append(s.FilaDeEspera, cliente)
-	s.mutexFila.Unlock()
+	// Se chegou aqui, não encontrou oponente em NENHUM servidor nesta tentativa.
+	return false
 }
 
 // realizarSolicitacaoMatchmaking envia uma requisição de oponente para um servidor específico.
@@ -1979,9 +2050,21 @@ func (s *Servidor) realizarSolicitacaoMatchmaking(addr string, cliente *Cliente)
 	if res.PartidaEncontrada {
 		log.Printf("[MATCHMAKING-TX] Partida encontrada no servidor %s! Sala: %s, Oponente: %s", addr, res.SalaID, res.OponenteNome)
 
+		// A requisição foi bem-sucedida, então removemos nosso cliente da fila local.
+		s.mutexFila.Lock()
+		for i, c := range s.FilaDeEspera {
+			if c.ID == cliente.ID {
+				s.FilaDeEspera = append(s.FilaDeEspera[:i], s.FilaDeEspera[i+1:]...)
+				break
+			}
+		}
+		s.mutexFila.Unlock()
+
 		// Cria a sala como Sombra neste servidor.
-		novaSala := &Sala{
-			ID:             res.SalaID,
+		salaID := res.SalaID
+		s.mutexSalas.Lock()
+		s.Salas[salaID] = &Sala{
+			ID:             salaID,
 			Jogadores:      []*Cliente{cliente},
 			Estado:         "AGUARDANDO_COMPRA",
 			CartasNaMesa:   make(map[string]Carta),
@@ -1992,13 +2075,10 @@ func (s *Servidor) realizarSolicitacaoMatchmaking(addr string, cliente *Cliente)
 			ServidorHost:   res.ServidorHost,
 			ServidorSombra: s.MeuEndereco,
 		}
-
-		s.mutexSalas.Lock()
-		s.Salas[res.SalaID] = novaSala
 		s.mutexSalas.Unlock()
 
 		cliente.mutex.Lock()
-		cliente.Sala = novaSala
+		cliente.Sala = s.Salas[salaID]
 		cliente.mutex.Unlock()
 
 		// Notifica o servidor Host para confirmar a participação do nosso jogador.
@@ -2012,8 +2092,11 @@ func (s *Servidor) realizarSolicitacaoMatchmaking(addr string, cliente *Cliente)
 		// Notifica nosso cliente local.
 		s.publicarParaCliente(cliente.ID, protocolo.Mensagem{
 			Comando: "PARTIDA_ENCONTRADA",
-			Dados:   mustJSON(protocolo.DadosPartidaEncontrada{SalaID: res.SalaID, OponenteID: "oponente_remoto", OponenteNome: res.OponenteNome}), // O ID exato do oponente não é conhecido aqui, mas o cliente precisa de um valor.
-		})
+			Dados: mustJSON(protocolo.DadosPartidaEncontrada{
+				SalaID:       res.SalaID,
+				OponenteID:   "remoto_" + res.OponenteNome, // Um ID placeholder, mas que ajuda a identificar
+				OponenteNome: res.OponenteNome,             // Nome correto recebido do Host
+			})})
 		return true
 	}
 
@@ -2332,6 +2415,56 @@ func (s *Servidor) processarJogadaComoHost(sala *Sala, clienteID, cartaID string
 		go s.replicarEstadoParaShadow(sala.ServidorSombra, estado)
 	}
 
+	// --- ADICIONE O CÓDIGO ABAIXO ---
+	// Após processar a jogada, pega a última mensagem enviada aos clientes locais
+	// e a retransmite para o servidor Sombra, se houver.
+
+	// (Esta parte assume que as funções notificar... publicam a mensagem correta.
+	// Precisamos capturar essa mensagem ou reconstruí-la aqui)
+
+	// Reconstrói a mensagem de atualização para enviar à Sombra
+	contagemCartas := make(map[string]int)
+	ultimaJogada := make(map[string]Carta) // Precisamos das cartas jogadas nesta rodada
+	vencedorDaJogada := ""                 // Precisamos do resultado da última jogada
+
+	// Rebusca informações atualizadas (simplificado, idealmente viria do resolverJogada)
+	for _, j := range sala.Jogadores {
+		j.mutex.Lock()
+		contagemCartas[j.Nome] = len(j.Inventario)
+		j.mutex.Unlock()
+		if c, ok := sala.CartasNaMesa[j.Nome]; ok { // Pega cartas da mesa se ainda não foram limpas
+			ultimaJogada[j.Nome] = c
+		}
+	}
+	// Lógica para determinar vencedorDaJogada se aplicável (precisa ser extraída de resolverJogada)
+
+	msgUpdate := protocolo.Mensagem{
+		Comando: "ATUALIZACAO_JOGO",
+		Dados: mustJSON(protocolo.DadosAtualizacaoJogo{
+			MensagemDoTurno: fmt.Sprintf("Jogada de %s processada.", nomeJogador), // Mensagem genérica
+			NumeroRodada:    sala.NumeroRodada,
+			ContagemCartas:  contagemCartas,
+			UltimaJogada:    ultimaJogada,
+			VencedorJogada:  vencedorDaJogada, // Pode estar vazio se só um jogou
+			PontosRodada:    sala.PontosRodada,
+			PontosPartida:   sala.PontosPartida,
+		}),
+	}
+
+	// Envia para a Sombra retransmitir
+	if sala.ServidorSombra != "" && sala.ServidorSombra != s.MeuEndereco {
+		var jogadorRemotoID string
+		// Encontra o ID do jogador que NÃO é o que acabou de jogar (o destinatário remoto)
+		for _, jogador := range sala.Jogadores {
+			if jogador.ID != clienteID { // Encontra o ID do outro jogador na sala
+				jogadorRemotoID = jogador.ID
+				break
+			}
+		}
+		if jogadorRemotoID != "" {
+			go s.notificarJogadorRemoto(sala.ServidorSombra, jogadorRemotoID, msgUpdate)
+		}
+	}
 	return estado
 }
 
