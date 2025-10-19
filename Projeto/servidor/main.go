@@ -50,7 +50,7 @@ type InfoServidor struct {
 type Cliente struct {
 	ID         string
 	Nome       string
-	Inventario []Carta
+	Inventario []protocolo.Carta
 	Sala       *Sala
 	mutex      sync.Mutex
 }
@@ -290,64 +290,89 @@ func (s *Servidor) handleInfoRequest(client mqtt.Client, msg mqtt.Message) {
 }
 
 func (s *Servidor) handleClienteLogin(client mqtt.Client, msg mqtt.Message) {
-	// EXTRAI O ID TEMPORÁRIO DO CLIENTE DO TÓPICO
-	// Tópico vem como: clientes/{tempID}/login
+	s.mutexClientes.Lock()         // Bloqueia logo no início
+	defer s.mutexClientes.Unlock() // Garante que desbloqueia ao sair
+
 	parts := strings.Split(msg.Topic(), "/")
 	if len(parts) < 3 {
-		log.Printf("Tópico de login inválido: %s", msg.Topic())
+		log.Printf("[LOGIN_ERRO:%s] Tópico de login inválido: %s", s.ServerID, msg.Topic())
 		return
 	}
-	tempClientID := parts[1] // Pega o ID temporário
+	tempClientID := parts[1]
+
+	var mensagem protocolo.Mensagem
+	log.Printf("[LOGIN_DEBUG:%s] Payload recebido: %s", s.ServerID, string(msg.Payload()))
+	if err := json.Unmarshal(msg.Payload(), &mensagem); err != nil {
+		log.Printf("[LOGIN_ERRO:%s] Erro ao decodificar mensagem: %v", s.ServerID, err)
+		return
+	}
 
 	var dados protocolo.DadosLogin
-	if err := json.Unmarshal(msg.Payload(), &dados); err != nil {
-		log.Printf("Erro ao decodificar login: %v", err)
+	if err := json.Unmarshal(mensagem.Dados, &dados); err != nil {
+		log.Printf("[LOGIN_ERRO:%s] Erro ao decodificar dados de login: %v", s.ServerID, err)
+		return
+	}
+	log.Printf("[LOGIN_DEBUG:%s] Dados decodificados - Nome: '%s' (len=%d)", s.ServerID, dados.Nome, len(dados.Nome))
+	if dados.Nome == "" {
+		log.Printf("[LOGIN_ERRO:%s] Nome do jogador vazio recebido no login.", s.ServerID)
+		erroMsg := protocolo.Mensagem{Comando: "ERRO", Dados: mustJSON(protocolo.DadosErro{Mensagem: "Nome de usuário não pode ser vazio."})}
+		s.publicarParaCliente(tempClientID, erroMsg)
 		return
 	}
 
-	// GERA O ID PERMANENTE DO CLIENTE
-	clienteID := uuid.New().String()
+	log.Printf("[LOGIN_DEBUG:%s] Nome válido, criando cliente...", s.ServerID)
+	clienteID := uuid.New().String() // ID permanente
 	novoCliente := &Cliente{
 		ID:         clienteID,
 		Nome:       dados.Nome,
-		Inventario: make([]Carta, 0),
+		Inventario: make([]protocolo.Carta, 0),
 	}
 
-	s.mutexClientes.Lock()
+	log.Printf("[LOGIN_DEBUG:%s] Adicionando cliente ao mapa...", s.ServerID)
 	s.Clientes[clienteID] = novoCliente
-	s.mutexClientes.Unlock()
+	log.Printf("[LOGIN_DEBUG:%s] Cliente adicionado ao mapa.", s.ServerID)
 
-	log.Printf("Cliente %s (ID permanente: %s) conectado", dados.Nome, clienteID)
+	log.Printf("[LOGIN:%s] Cliente %s (ID temp: %s, ID perm: %s) registrado e pronto.", s.ServerID, dados.Nome, tempClientID, clienteID)
 
-	// ENVIA A CONFIRMAÇÃO DE VOLTA PARA O TÓPICO TEMPORÁRIO
+	// Envia confirmação de volta para o TÓPICO TEMPORÁRIO
+	log.Printf("[LOGIN_DEBUG:%s] Enviando resposta LOGIN_OK...", s.ServerID)
 	resposta := protocolo.Mensagem{
 		Comando: "LOGIN_OK",
 		Dados:   mustJSON(map[string]string{"cliente_id": clienteID, "servidor": s.MeuEndereco}),
 	}
-
-	// Usa a função publicarParaCliente, mas com o ID temporário
 	s.publicarParaCliente(tempClientID, resposta)
+	log.Printf("[LOGIN_DEBUG:%s] Resposta LOGIN_OK enviada.", s.ServerID)
 }
 
 func (s *Servidor) handleClienteEntrarFila(client mqtt.Client, msg mqtt.Message) {
 	var dados map[string]string
 	if err := json.Unmarshal(msg.Payload(), &dados); err != nil {
-		log.Printf("Erro ao decodificar entrada na fila: %v", err)
+		log.Printf("[ENTRAR_FILA_ERRO:%s] Erro ao decodificar JSON: %v", s.ServerID, err)
 		return
 	}
+	clienteID := dados["cliente_id"] // ID PERMANENTE enviado pelo cliente
 
-	clienteID := dados["cliente_id"]
-
-	s.mutexClientes.RLock()
+	s.mutexClientes.RLock() // Lock de leitura para verificar
 	cliente, existe := s.Clientes[clienteID]
+	nomeCliente := ""
+	if existe {
+		cliente.mutex.Lock() // Lock no cliente específico para ler o nome
+		nomeCliente = cliente.Nome
+		cliente.mutex.Unlock()
+	}
 	s.mutexClientes.RUnlock()
 
-	if !existe {
-		log.Printf("Cliente %s não encontrado", clienteID)
+	// Verifica se o cliente existe E se o nome não está vazio
+	if !existe || nomeCliente == "" {
+		log.Printf("[ENTRAR_FILA_ERRO:%s] Cliente %s não encontrado ou nome ainda vazio (login pode não ter sido concluído).", s.ServerID, clienteID)
+		// Notificar o cliente seria ideal aqui
+		s.publicarParaCliente(clienteID, protocolo.Mensagem{Comando: "ERRO", Dados: mustJSON(protocolo.DadosErro{Mensagem: "Erro ao entrar na fila. Tente novamente."})})
 		return
 	}
 
-	s.entrarFila(cliente)
+	// Se chegou aqui, o cliente existe e tem nome (login concluído)
+	log.Printf("[ENTRAR_FILA:%s] Cliente %s (%s) encontrado. Adicionando à fila.", s.ServerID, nomeCliente, clienteID)
+	s.entrarFila(cliente) // Chama a função que adiciona à fila e inicia a busca
 }
 
 func (s *Servidor) handleComandoPartida(client mqtt.Client, msg mqtt.Message) {
@@ -985,13 +1010,8 @@ func (s *Servidor) handleAtualizarEstado(c *gin.Context) {
 }
 
 // ==================== HANDLERS DE MATCHMAKING GLOBAL ====================
-
-// handleSolicitarOponente é chamado por outro servidor procurando um oponente.
-// handleSolicitarOponente é chamado por outro servidor procurando um oponente.
 func (s *Servidor) handleSolicitarOponente(c *gin.Context) {
-	// --- LOGS DE DEPURACÇÃO ADICIONADOS ---
-	log.Printf("[HANDLE_SOLICITAR_OPONENTE-RX] Recebida requisição de %s", c.Request.RemoteAddr)
-	// --- FIM DOS LOGS DE DEPURACÇÃO ---
+	log.Printf("[HANDLE_SOLICITAR_OPONENTE-RX:%s] Recebida requisição de %s", s.ServerID, c.Request.RemoteAddr)
 
 	var req struct {
 		SolicitanteID   string `json:"solicitante_id"`
@@ -999,43 +1019,71 @@ func (s *Servidor) handleSolicitarOponente(c *gin.Context) {
 		ServidorOrigem  string `json:"servidor_origem"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		log.Printf("[HANDLE_SOLICITAR_OPONENTE-RX] Erro no Bind JSON: %v", err)
+		log.Printf("[HANDLE_SOLICITAR_OPONENTE-RX:%s] Erro no Bind JSON: %v", s.ServerID, err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	log.Printf("[MATCHMAKING-RX] Recebida solicitação de oponente de %s@%s", req.SolicitanteNome, req.ServidorOrigem)
+	log.Printf("[MATCHMAKING-RX:%s] Recebida solicitação de oponente de %s@%s",
+		s.ServerID, req.SolicitanteNome, req.ServidorOrigem)
 
-	s.mutexFila.Lock() // Bloqueia para modificar a fila
-	// --- LOG DE DEPURACÇÃO ADICIONADO ---
-	tamanhoFilaDepoisLock := len(s.FilaDeEspera)
-	log.Printf("[HANDLE_SOLICITAR_OPONENTE-RX] Tamanho da fila DEPOIS do Lock: %d", tamanhoFilaDepoisLock)
-	// --- FIM DO LOG DE DEPURACÇÃO ---
+	var oponenteLocal *Cliente
 
+	// --- BLOCO DE BUSCA SEGURA NA FILA ---
+	s.mutexFila.Lock()
 	if len(s.FilaDeEspera) > 0 {
-		// Oponente encontrado!
-		oponenteLocal := s.FilaDeEspera[0]
-		s.FilaDeEspera = s.FilaDeEspera[1:] // Remove da fila
-		s.mutexFila.Unlock()                // Desbloqueia AGORA, antes de fazer mais coisas
+		oponenteLocal = s.FilaDeEspera[0]
 
-		// --- LOG DE DEPURACÇÃO ADICIONADO ---
-		log.Printf("[HANDLE_SOLICITAR_OPONENTE-MATCH!] Oponente local %s (ID: %s) encontrado para %s@%s. A responder com 'true'.",
-			oponenteLocal.Nome, oponenteLocal.ID, req.SolicitanteNome, req.ServidorOrigem)
-		// --- FIM DO LOG DE DEPURACÇÃO ---
+		// Verifica se o oponente ainda é válido no mapa de clientes
+		s.mutexClientes.RLock()
+		clienteCompleto, ok := s.Clientes[oponenteLocal.ID]
+		s.mutexClientes.RUnlock()
 
-		// Este servidor (que encontrou o oponente) será o Host.
+		nomeOponenteLocal := ""
+		if ok {
+			clienteCompleto.mutex.Lock()
+			nomeOponenteLocal = clienteCompleto.Nome
+			clienteCompleto.mutex.Unlock()
+		}
+
+		if nomeOponenteLocal != "" {
+			// Tudo certo, remove da fila
+			s.FilaDeEspera = s.FilaDeEspera[1:]
+		} else {
+			// Nome vazio: o cliente está inconsistente, não remove da fila
+			log.Printf("[HANDLE_SOLICITAR_OPONENTE-ERRO:%s] Encontrou oponente %s na fila, mas o nome está vazio no mapa principal! Não removendo da fila.",
+				s.ServerID, oponenteLocal.ID)
+			oponenteLocal = nil
+		}
+	}
+	s.mutexFila.Unlock()
+	// --- FIM DO BLOCO DE BUSCA SEGURA ---
+
+	if oponenteLocal != nil {
+		// Re-lê o nome de forma segura para garantir
+		s.mutexClientes.RLock()
+		clienteCompleto, _ := s.Clientes[oponenteLocal.ID]
+		s.mutexClientes.RUnlock()
+		clienteCompleto.mutex.Lock()
+		nomeOponenteLocal := clienteCompleto.Nome
+		clienteCompleto.mutex.Unlock()
+
+		log.Printf("[HANDLE_SOLICITAR_OPONENTE-MATCH!:%s] Oponente local %s (ID: %s) encontrado para %s@%s. A responder com 'true'.",
+			s.ServerID, nomeOponenteLocal, oponenteLocal.ID, req.SolicitanteNome, req.ServidorOrigem)
+
+		// Cria a sala e define o servidor atual como HOST
 		salaID := uuid.New().String()
 		novaSala := &Sala{
 			ID:             salaID,
-			Jogadores:      []*Cliente{oponenteLocal}, // Adiciona jogador local
-			Estado:         "AGUARDANDO_JOGADORES",    // Estado inicial
+			Jogadores:      []*Cliente{oponenteLocal},
+			Estado:         "AGUARDANDO_JOGADORES",
 			CartasNaMesa:   make(map[string]Carta),
 			PontosRodada:   make(map[string]int),
 			PontosPartida:  make(map[string]int),
 			NumeroRodada:   1,
 			Prontos:        make(map[string]bool),
-			ServidorHost:   s.MeuEndereco,      // Eu sou o Host
-			ServidorSombra: req.ServidorOrigem, // O outro servidor é a Sombra
+			ServidorHost:   s.MeuEndereco,
+			ServidorSombra: req.ServidorOrigem,
 		}
 
 		s.mutexSalas.Lock()
@@ -1046,29 +1094,28 @@ func (s *Servidor) handleSolicitarOponente(c *gin.Context) {
 		oponenteLocal.Sala = novaSala
 		oponenteLocal.mutex.Unlock()
 
-		// Responde ao servidor solicitante com os detalhes da partida
+		// Responde ao servidor solicitante
 		c.JSON(http.StatusOK, gin.H{
 			"partida_encontrada": true,
 			"sala_id":            salaID,
-			"oponente_nome":      oponenteLocal.Nome, // Nome do jogador LOCAL que foi encontrado
+			"oponente_nome":      nomeOponenteLocal,
 			"servidor_host":      s.MeuEndereco,
 		})
 
-		// Notifica o jogador local sobre o oponente REMOTO
+		// Notifica o jogador local sobre o oponente remoto
 		s.publicarParaCliente(oponenteLocal.ID, protocolo.Mensagem{
 			Comando: "PARTIDA_ENCONTRADA",
 			Dados: mustJSON(protocolo.DadosPartidaEncontrada{
 				SalaID:       salaID,
-				OponenteID:   req.SolicitanteID,   // ID do jogador remoto
-				OponenteNome: req.SolicitanteNome, // Nome do jogador remoto
+				OponenteID:   req.SolicitanteID,
+				OponenteNome: req.SolicitanteNome,
 			}),
 		})
 
 	} else {
-		s.mutexFila.Unlock() // Desbloqueia se não encontrou ninguém
-		// --- LOG DE DEPURACÇÃO ADICIONADO ---
-		log.Printf("[HANDLE_SOLICITAR_OPONENTE-NO_MATCH] Nenhum oponente local na fila para %s@%s. A responder com 'false'.", req.SolicitanteNome, req.ServidorOrigem)
-		// --- FIM DO LOG DE DEPURACÇÃO ---
+		// Nenhum oponente disponível
+		log.Printf("[HANDLE_SOLICITAR_OPONENTE-NO_MATCH:%s] Nenhum oponente local válido na fila para %s@%s. A responder com 'false'.",
+			s.ServerID, req.SolicitanteNome, req.ServidorOrigem)
 		c.JSON(http.StatusOK, gin.H{"partida_encontrada": false})
 	}
 }
@@ -1164,7 +1211,7 @@ func (s *Servidor) handleGameStart(c *gin.Context) {
 			cliente = &Cliente{
 				ID:         player.ID,
 				Nome:       player.Nome,
-				Inventario: make([]Carta, 0),
+				Inventario: make([]protocolo.Carta, 0),
 				Sala:       novaSala,
 			}
 			s.Clientes[player.ID] = cliente
@@ -2107,41 +2154,73 @@ func (s *Servidor) realizarSolicitacaoMatchmaking(addr string, cliente *Cliente)
 func (s *Servidor) criarSala(j1, j2 *Cliente) {
 	salaID := uuid.New().String()
 
+	// --- CORREÇÃO: Buscar nomes de forma segura ---
+	s.mutexClientes.RLock()
+	cliente1Completo, ok1 := s.Clientes[j1.ID]
+	cliente2Completo, ok2 := s.Clientes[j2.ID]
+	s.mutexClientes.RUnlock()
+
+	if !ok1 || !ok2 {
+		log.Printf("[CRIAR_SALA_ERRO:%s] Falha ao buscar informações completas dos clientes %s ou %s no mapa principal.", s.ServerID, j1.ID, j2.ID)
+		return // Aborta a criação da sala
+	}
+
+	// Usa os nomes dos clientes buscados do mapa principal
+	// Leitura segura dos nomes dentro do lock do cliente específico
+	cliente1Completo.mutex.Lock()
+	nomeJ1 := cliente1Completo.Nome
+	cliente1Completo.mutex.Unlock()
+	cliente2Completo.mutex.Lock()
+	nomeJ2 := cliente2Completo.Nome
+	cliente2Completo.mutex.Unlock()
+
+	idJ1 := cliente1Completo.ID
+	idJ2 := cliente2Completo.ID
+
+	log.Printf("[CRIAR_SALA:%s] Tentando criar sala %s para %s (%s) vs %s (%s)", s.ServerID, salaID, nomeJ1, idJ1, nomeJ2, idJ2)
+	if nomeJ1 == "" || nomeJ2 == "" {
+		log.Printf("[CRIAR_SALA_ERRO:%s] Nomes vazios detectados mesmo após busca! Cliente1: '%s', Cliente2: '%s'. Abortando.", s.ServerID, nomeJ1, nomeJ2)
+		return // Aborta se os nomes ainda estiverem vazios
+	}
+	// --- FIM DA CORREÇÃO ---
+
+	// O resto da função continua...
 	novaSala := &Sala{
 		ID:             salaID,
-		Jogadores:      []*Cliente{j1, j2},
+		Jogadores:      []*Cliente{cliente1Completo, cliente2Completo}, // Usa os ponteiros completos
 		Estado:         "AGUARDANDO_COMPRA",
 		CartasNaMesa:   make(map[string]Carta),
 		PontosRodada:   make(map[string]int),
 		PontosPartida:  make(map[string]int),
 		NumeroRodada:   1,
 		Prontos:        make(map[string]bool),
-		ServidorHost:   s.MeuEndereco, // Este servidor é o host
-		ServidorSombra: "",            // TODO: determinar sombra se jogadores de servidores diferentes
+		ServidorHost:   s.MeuEndereco,
+		ServidorSombra: "",
 	}
-
+	// Adiciona a sala ao mapa
 	s.mutexSalas.Lock()
 	s.Salas[salaID] = novaSala
 	s.mutexSalas.Unlock()
 
-	j1.mutex.Lock()
-	j1.Sala = novaSala
-	j1.mutex.Unlock()
+	// Associa os clientes à sala
+	cliente1Completo.mutex.Lock()
+	cliente1Completo.Sala = novaSala
+	cliente1Completo.mutex.Unlock()
 
-	j2.mutex.Lock()
-	j2.Sala = novaSala
-	j2.mutex.Unlock()
+	cliente2Completo.mutex.Lock()
+	cliente2Completo.Sala = novaSala
+	cliente2Completo.mutex.Unlock()
 
-	log.Printf("Sala %s criada: %s vs %s", salaID, j1.Nome, j2.Nome)
+	log.Printf("Sala %s criada localmente: %s vs %s", salaID, nomeJ1, nomeJ2)
 
-	// Notifica jogadores
+	// Notifica jogadores - GARANTE QUE USA OS NOMES CORRETOS
 	msg1 := protocolo.Mensagem{
 		Comando: "PARTIDA_ENCONTRADA",
-		Dados:   mustJSON(protocolo.DadosPartidaEncontrada{SalaID: salaID, OponenteID: j2.ID, OponenteNome: j2.Nome}),
+		Dados:   mustJSON(protocolo.DadosPartidaEncontrada{SalaID: salaID, OponenteID: idJ2, OponenteNome: nomeJ2}),
 	}
 	msg2 := protocolo.Mensagem{
 		Comando: "PARTIDA_ENCONTRADA",
-		Dados:   mustJSON(protocolo.DadosPartidaEncontrada{SalaID: salaID, OponenteID: j1.ID, OponenteNome: j1.Nome}),
+		Dados:   mustJSON(protocolo.DadosPartidaEncontrada{SalaID: salaID, OponenteID: idJ1, OponenteNome: nomeJ1}),
 	}
 
 	s.publicarParaCliente(j1.ID, msg1)
