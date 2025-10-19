@@ -1012,6 +1012,7 @@ func (s *Servidor) handleAtualizarEstado(c *gin.Context) {
 // ==================== HANDLERS DE MATCHMAKING GLOBAL ====================
 func (s *Servidor) handleSolicitarOponente(c *gin.Context) {
 	log.Printf("[HANDLE_SOLICITAR_OPONENTE-RX:%s] Recebida requisição de %s", s.ServerID, c.Request.RemoteAddr)
+	log.Printf("[HANDLE_SOLICITAR_OPONENTE-RX:%s] Tamanho da fila atual: %d", s.ServerID, len(s.FilaDeEspera))
 
 	var req struct {
 		SolicitanteID   string `json:"solicitante_id"`
@@ -2075,7 +2076,16 @@ func (s *Servidor) realizarSolicitacaoMatchmaking(addr string, cliente *Cliente)
 	})
 
 	httpClient := &http.Client{Timeout: 3 * time.Second}
-	resp, err := httpClient.Post(fmt.Sprintf("http://%s/matchmaking/solicitar_oponente", addr), "application/json", bytes.NewBuffer(reqBody))
+	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s/matchmaking/solicitar_oponente", addr), bytes.NewBuffer(reqBody))
+	if err != nil {
+		log.Printf("[MATCHMAKING-TX] Erro ao criar requisição para %s: %v", addr, err)
+		return false
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+generateJWT(s.ServerID))
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		log.Printf("[MATCHMAKING-TX] Erro ao contatar servidor %s: %v", addr, err)
 		return false
