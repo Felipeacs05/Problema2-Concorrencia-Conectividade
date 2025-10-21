@@ -1,0 +1,2 @@
+JogadorEspera
+2

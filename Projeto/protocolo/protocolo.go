@@ -61,7 +61,8 @@ type DadosPartidaEncontrada struct {
 
 // Dados para envio de mensagens de chat
 type DadosEnviarChat struct {
-	Texto string `json:"texto"` // Conteúdo da mensagem de chat
+	ClienteID string `json:"cliente_id"`
+	Texto     string `json:"texto"` // Conteúdo da mensagem de chat
 }
 
 // Dados para jogada de carta

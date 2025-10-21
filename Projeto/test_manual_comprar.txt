@@ -1,0 +1,3 @@
+JogadorManual
+2
+/comprar

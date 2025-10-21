@@ -1,0 +1,3 @@
+JogadorComprarFinal
+2
+/comprar

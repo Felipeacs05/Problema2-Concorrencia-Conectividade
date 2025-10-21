@@ -1,0 +1,3 @@
+JogadorDebug1
+2
+/comprar

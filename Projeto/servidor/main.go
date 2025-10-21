@@ -70,6 +70,7 @@ type Sala struct {
 	EventSeq       int64       // Sequência de eventos para ordenação
 	EventLog       []GameEvent // Log append-only de eventos da partida
 	mutex          sync.Mutex
+	TurnoDe        string // ID do jogador que deve jogar
 }
 
 // GameEvent representa um evento no log da partida
@@ -154,7 +155,7 @@ type Servidor struct {
 
 	// Estoque de Cartas (apenas o líder gerencia diretamente)
 	Estoque      map[string][]Carta // raridade -> cartas
-	mutexEstoque sync.Mutex
+	mutexEstoque sync.RWMutex
 
 	// Gerenciamento de Partidas
 	Clientes        map[string]*Cliente // clienteID -> Cliente
@@ -185,6 +186,9 @@ func main() {
 }
 
 func (s *Servidor) Run() {
+	// Inicializa gerador aleatório
+	rand.Seed(time.Now().UnixNano())
+
 	log.Printf("Iniciando servidor em %s | Broker MQTT: %s", s.MeuEndereco, s.BrokerMQTT)
 
 	s.inicializarEstoque()
@@ -386,11 +390,16 @@ func (s *Servidor) handleComandoPartida(client mqtt.Client, msg mqtt.Message) {
 	}
 	salaID := partes[1]
 
+	log.Printf("[COMANDO_DEBUG] Comando recebido no tópico: %s", topico)
+	log.Printf("[COMANDO_DEBUG] Payload: %s", string(msg.Payload()))
+
 	var mensagem protocolo.Mensagem
 	if err := json.Unmarshal(msg.Payload(), &mensagem); err != nil {
 		log.Printf("Erro ao decodificar comando: %v", err)
 		return
 	}
+
+	log.Printf("[COMANDO_DEBUG] Comando decodificado: %s", mensagem.Comando)
 
 	s.mutexSalas.RLock()
 	sala, existe := s.Salas[salaID]
@@ -431,33 +440,45 @@ func (s *Servidor) handleComandoPartida(client mqtt.Client, msg mqtt.Message) {
 			s.encaminharJogadaParaHost(sala, clienteID, cartaID)
 		}
 
-	case "ENVIAR_CHAT":
-		var dados map[string]string
-		json.Unmarshal(mensagem.Dados, &dados)
-		texto := dados["texto"]
-		clienteID := dados["cliente_id"]
+	case "CHAT":
+		var dadosCliente protocolo.DadosEnviarChat
+		if err := json.Unmarshal(mensagem.Dados, &dadosCliente); err != nil {
+			log.Printf("[CHAT_ERRO] Erro ao decodificar dados do chat: %v", err)
+			return
+		}
 
-		// Encontra o nome do jogador
-		var nomeRemetente string
+		clienteID := dadosCliente.ClienteID
 		s.mutexClientes.RLock()
-		if cliente, existe := s.Clientes[clienteID]; existe {
-			nomeRemetente = cliente.Nome
-		}
+		cliente := s.Clientes[clienteID]
 		s.mutexClientes.RUnlock()
-
-		s.broadcastChat(sala, texto, nomeRemetente)
-
-	case "TROCAR_CARTAS_OFERTA":
-		var req protocolo.TrocarCartasReq
-		if err := json.Unmarshal(mensagem.Dados, &req); err == nil {
-			s.processarTrocaCartas(sala, &req)
+		if cliente == nil {
+			return // Early exit se o cliente não for encontrado
 		}
+		cliente.mutex.Lock()
+		nomeJogador := cliente.Nome
+		cliente.mutex.Unlock()
+
+		if nomeJogador == "" {
+			log.Printf("[CHAT_ERRO] Nome do jogador para cliente %s não encontrado.", clienteID)
+			return
+		}
+
+		s.broadcastChat(sala, dadosCliente.Texto, nomeJogador)
+
+	case "TROCAR_CARTAS":
+		var req protocolo.TrocarCartasReq
+		if err := json.Unmarshal(mensagem.Dados, &req); err != nil {
+			log.Printf("[TROCA_ERRO] Erro ao decodificar requisição de troca: %v", err)
+			return
+		}
+		s.processarTrocaCartas(sala, &req)
 	}
 }
 
 func (s *Servidor) publicarParaCliente(clienteID string, msg protocolo.Mensagem) {
 	payload, _ := json.Marshal(msg)
 	topico := fmt.Sprintf("clientes/%s/eventos", clienteID)
+	log.Printf("[PUBLICAR_CLIENTE] Enviando para %s no tópico %s: %s", clienteID, topico, string(payload))
 	s.MQTTClient.Publish(topico, 0, false, payload)
 }
 
@@ -602,6 +623,7 @@ func (s *Servidor) iniciarAPI() {
 		authenticated.POST("/partida/sincronizar_estado", s.handleSincronizarEstado)
 		authenticated.POST("/partida/notificar_jogador", s.handleNotificarJogador)
 		authenticated.POST("/partida/atualizar_estado", s.handleAtualizarEstado)
+		authenticated.POST("/partida/notificar_pronto", s.handleNotificarPronto)
 
 		// Rotas de matchmaking global
 		authenticated.POST("/matchmaking/solicitar_oponente", s.handleSolicitarOponente)
@@ -929,6 +951,10 @@ func (s *Servidor) handleEncaminharComando(c *gin.Context) {
 			"estado": estado,
 		})
 
+	case "COMPRAR_PACOTE":
+		clienteIDRemoto := dados["cliente_id"].(string)
+		s.processarCompraPacote(clienteIDRemoto, sala)
+		c.JSON(http.StatusOK, gin.H{"status": "compra_processada"})
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Comando não reconhecido"})
 	}
@@ -1007,6 +1033,50 @@ func (s *Servidor) handleAtualizarEstado(c *gin.Context) {
 	s.publicarEventoPartida(dadosComSala.SalaID, msg)
 
 	c.JSON(http.StatusOK, gin.H{"status": "evento retransmitido"})
+}
+
+// handleNotificarPronto é chamado pela Sombra para notificar que seu jogador comprou o pacote.
+func (s *Servidor) handleNotificarPronto(c *gin.Context) {
+	var req struct {
+		SalaID    string `json:"sala_id"`
+		ClienteID string `json:"cliente_id"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Requisição inválida"})
+		return
+	}
+
+	s.mutexSalas.RLock()
+	sala, existe := s.Salas[req.SalaID]
+	s.mutexSalas.RUnlock()
+
+	if !existe {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Sala não encontrada"})
+		return
+	}
+
+	// Busca o nome do cliente remoto
+	s.mutexClientes.RLock()
+	cliente, ok := s.Clientes[req.ClienteID]
+	s.mutexClientes.RUnlock()
+
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Cliente não encontrado"})
+		return
+	}
+
+	// Marca o jogador como pronto
+	sala.mutex.Lock()
+	sala.Prontos[cliente.Nome] = true
+	sala.mutex.Unlock()
+
+	log.Printf("[NOTIFICAR_PRONTO] Host notificado que o jogador remoto %s (%s) está pronto na sala %s.", cliente.Nome, cliente.ID, sala.ID)
+
+	// Verifica se a partida pode iniciar
+	go s.verificarEIniciarPartidaSeProntos(sala)
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
 // ==================== HANDLERS DE MATCHMAKING GLOBAL ====================
@@ -1841,6 +1911,10 @@ func (s *Servidor) retirarCartasDoEstoque(quantidade int) []Carta {
 	s.mutexEstoque.Lock()
 	defer s.mutexEstoque.Unlock()
 
+	log.Printf("[ESTOQUE_DEBUG] Retirando %d cartas do estoque", quantidade)
+	log.Printf("[ESTOQUE_DEBUG] Estoque atual: C=%d, U=%d, R=%d, L=%d",
+		len(s.Estoque["C"]), len(s.Estoque["U"]), len(s.Estoque["R"]), len(s.Estoque["L"]))
+
 	cartas := make([]Carta, 0, quantidade)
 
 	for i := 0; i < quantidade; i++ {
@@ -1907,6 +1981,8 @@ func (s *Servidor) contarEstoque() int {
 }
 
 func (s *Servidor) contarEstoqueTotal() int {
+	s.mutexEstoque.RLock()
+	defer s.mutexEstoque.RUnlock()
 	total := 0
 	for _, cartas := range s.Estoque {
 		total += len(cartas)
@@ -1958,7 +2034,7 @@ func (s *Servidor) entrarFila(cliente *Cliente) {
 		return
 	}
 
-	// Se não encontrou, adiciona à fila local e tenta matchmaking global
+	// Se não encontrou, adiciona à fila local
 	s.FilaDeEspera = append(s.FilaDeEspera, cliente)
 	s.mutexFila.Unlock()
 
@@ -1968,8 +2044,26 @@ func (s *Servidor) entrarFila(cliente *Cliente) {
 		Dados:   mustJSON(map[string]string{"mensagem": "Procurando oponente em todos os servidores..."}),
 	})
 
-	log.Printf("[MATCHMAKING] Iniciando busca global persistente para %s (%s)", cliente.Nome, cliente.ID)
-	go s.gerenciarBuscaGlobalPersistente(cliente)
+	// Aguarda um pouco antes de iniciar busca global para dar chance de matchmaking local
+	go func() {
+		time.Sleep(2 * time.Second) // Aguarda 2 segundos
+
+		// Verifica se ainda está na fila local antes de iniciar busca global
+		s.mutexFila.Lock()
+		aindaNaFila := false
+		for _, c := range s.FilaDeEspera {
+			if c.ID == cliente.ID {
+				aindaNaFila = true
+				break
+			}
+		}
+		s.mutexFila.Unlock()
+
+		if aindaNaFila {
+			log.Printf("[MATCHMAKING] Iniciando busca global persistente para %s (%s)", cliente.Nome, cliente.ID)
+			s.gerenciarBuscaGlobalPersistente(cliente)
+		}
+	}()
 }
 
 // gerenciarBuscaGlobalPersistente tenta encontrar um oponente global periodicamente.
@@ -2233,7 +2327,9 @@ func (s *Servidor) criarSala(j1, j2 *Cliente) {
 		Dados:   mustJSON(protocolo.DadosPartidaEncontrada{SalaID: salaID, OponenteID: idJ1, OponenteNome: nomeJ1}),
 	}
 
+	log.Printf("[CRIAR_SALA:NOTIFICACAO] Enviando PARTIDA_ENCONTRADA para %s (ID: %s)", nomeJ1, idJ1)
 	s.publicarParaCliente(j1.ID, msg1)
+	log.Printf("[CRIAR_SALA:NOTIFICACAO] Enviando PARTIDA_ENCONTRADA para %s (ID: %s)", nomeJ2, idJ2)
 	s.publicarParaCliente(j2.ID, msg2)
 }
 
@@ -2244,10 +2340,13 @@ func (s *Servidor) processarCompraPacote(clienteID string, sala *Sala) {
 	lider := s.LiderAtual
 	s.mutexLider.RUnlock()
 
-	var cartas []Carta
+	log.Printf("[COMPRAR_DEBUG] Processando compra para cliente %s, souLider: %v", clienteID, souLider)
+
+	cartas := make([]Carta, 0) // Inicializa como slice vazio, não nil
 
 	if souLider {
 		cartas = s.retirarCartasDoEstoque(PACOTE_SIZE)
+		log.Printf("[COMPRAR_DEBUG] Líder retirou %d cartas do estoque", len(cartas))
 	} else {
 		// Faz requisição HTTP para o líder
 		dados := map[string]interface{}{
@@ -2286,35 +2385,87 @@ func (s *Servidor) processarCompraPacote(clienteID string, sala *Sala) {
 	// Notifica cliente
 	msg := protocolo.Mensagem{
 		Comando: "PACOTE_RESULTADO",
-		Dados:   mustJSON(protocolo.ComprarPacoteResp{Cartas: cartas}),
+		Dados: mustJSON(protocolo.ComprarPacoteResp{
+			Cartas:          cartas,
+			EstoqueRestante: s.contarEstoqueTotal(),
+		}),
 	}
-	s.publicarParaCliente(clienteID, msg)
+	// Correção: Notifica o cliente localmente via MQTT ou remotamente via API
+	if s.getClienteLocal(clienteID) != nil {
+		s.publicarParaCliente(clienteID, msg)
+	} else {
+		sala.mutex.Lock()
+		sombraAddr := sala.ServidorSombra
+		sala.mutex.Unlock()
+		if sombraAddr != "" {
+			go s.notificarJogadorRemoto(sombraAddr, clienteID, msg)
+		}
+	}
 
 	// Marca como pronto na sala
 	sala.mutex.Lock()
 	sala.Prontos[cliente.Nome] = true
-	prontos := len(sala.Prontos)
-	total := len(sala.Jogadores)
 	sala.mutex.Unlock()
 
-	// Se ambos estão prontos, inicia partida
-	if prontos == total {
-		s.iniciarPartida(sala)
-	}
+	// Delega a verificação de início de partida
+	go s.verificarEIniciarPartidaSeProntos(sala)
 }
 
 func (s *Servidor) iniciarPartida(sala *Sala) {
 	sala.mutex.Lock()
 	sala.Estado = "JOGANDO"
+	// Sorteia quem começa
+	jogadorInicial := sala.Jogadores[rand.Intn(len(sala.Jogadores))]
+	sala.TurnoDe = jogadorInicial.ID
 	sala.mutex.Unlock()
 
-	log.Printf("Partida %s iniciada", sala.ID)
+	log.Printf("[JOGO_DEBUG] Partida %s iniciada. Jogador inicial: %s (%s)", sala.ID, jogadorInicial.Nome, jogadorInicial.ID)
 
 	msg := protocolo.Mensagem{
 		Comando: "PARTIDA_INICIADA",
-		Dados:   mustJSON(map[string]string{"mensagem": "Partida iniciada! Jogue suas cartas."}),
+		Dados:   mustJSON(map[string]string{"mensagem": "Partida iniciada! É a vez de " + jogadorInicial.Nome}),
 	}
 	s.publicarEventoPartida(sala.ID, msg)
+}
+
+// verificarEIniciarPartidaSeProntos verifica se todos compraram e inicia a partida,
+// notificando a Sombra se necessário.
+func (s *Servidor) verificarEIniciarPartidaSeProntos(sala *Sala) {
+	sala.mutex.Lock()
+	prontos := len(sala.Prontos)
+	total := len(sala.Jogadores)
+	estadoAtual := sala.Estado
+	sombraAddr := sala.ServidorSombra
+	salaID := sala.ID
+	sala.mutex.Unlock()
+
+	// Só inicia se estiver aguardando e todos estiverem prontos
+	if estadoAtual == "AGUARDANDO_COMPRA" && prontos == total && total == 2 {
+		log.Printf("[INICIAR_PARTIDA:%s] Todos os jogadores da sala %s estão prontos. Iniciando.", s.ServerID, salaID)
+		s.iniciarPartida(sala) // Chama a função que muda o estado e notifica localmente
+
+		// Se houver uma sombra, notifica via API que a partida iniciou
+		if sombraAddr != "" {
+			// Cria uma mensagem simples para notificar a Sombra
+			msgInicioRemoto := protocolo.Mensagem{
+				Comando: "PARTIDA_INICIADA_REMOTA", // Um comando específico para a Sombra
+				Dados:   mustJSON(map[string]string{"sala_id": salaID}),
+			}
+			// Encontra o ID do jogador remoto para a notificação
+			var jogadorRemotoID string
+			sala.mutex.Lock()
+			for _, jogador := range sala.Jogadores {
+				if s.getClienteLocal(jogador.ID) == nil {
+					jogadorRemotoID = jogador.ID
+					break
+				}
+			}
+			sala.mutex.Unlock()
+			if jogadorRemotoID != "" {
+				go s.notificarJogadorRemoto(sombraAddr, jogadorRemotoID, msgInicioRemoto)
+			}
+		}
+	}
 }
 
 // encaminharJogadaParaHost encaminha uma jogada da Sombra para o Host via API REST
@@ -2405,8 +2556,29 @@ func (s *Servidor) promoverSombraAHost(sala *Sala) {
 
 // processarJogadaComoHost processa uma jogada quando este servidor é o Host
 func (s *Servidor) processarJogadaComoHost(sala *Sala, clienteID, cartaID string) *EstadoPartida {
+	s.mutexSalas.RLock()
+	sala, ok := s.Salas[sala.ID]
+	s.mutexSalas.RUnlock()
+	if !ok {
+		log.Printf("[JOGO_ERRO] Sala %s não encontrada para processar jogada.", sala.ID)
+		return nil
+	}
+
+	log.Printf("[JOGO_DEBUG] Host processando jogada. Sala: %s, Cliente: %s, Carta: %s", sala.ID, clienteID, cartaID)
+
 	sala.mutex.Lock()
 	defer sala.mutex.Unlock()
+
+	if sala.Estado != "JOGANDO" {
+		log.Printf("[JOGO_ERRO] Partida %s não está em andamento.", sala.ID)
+		return nil
+	}
+
+	if clienteID != sala.TurnoDe {
+		log.Printf("[JOGO_AVISO] Jogada fora de turno. Cliente: %s, Turno de: %s", clienteID, sala.TurnoDe)
+		s.notificarErroPartida(clienteID, "Não é sua vez de jogar.", sala.ID)
+		return nil
+	}
 
 	// Incrementa eventSeq
 	sala.EventSeq++
@@ -2667,9 +2839,20 @@ func (s *Servidor) notificarAguardandoOponente(sala *Sala) {
 		}),
 	}
 
-	s.publicarEventoPartida(sala.ID, msg)
-	if sala.ServidorSombra != "" {
-		s.enviarAtualizacaoParaSombra(sala.ServidorSombra, msg)
+	sala.mutex.Lock()
+	jogadores := make([]*Cliente, len(sala.Jogadores))
+	copy(jogadores, sala.Jogadores)
+	sombraAddr := sala.ServidorSombra
+	sala.mutex.Unlock()
+
+	for _, jogador := range jogadores {
+		if s.getClienteLocal(jogador.ID) != nil {
+			s.publicarParaCliente(jogador.ID, msg)
+		} else {
+			if sombraAddr != "" {
+				go s.notificarJogadorRemoto(sombraAddr, jogador.ID, msg)
+			}
+		}
 	}
 }
 
@@ -2697,9 +2880,20 @@ func (s *Servidor) notificarResultadoJogada(sala *Sala, vencedorJogada string) {
 		}),
 	}
 
-	s.publicarEventoPartida(sala.ID, msg)
-	if sala.ServidorSombra != "" {
-		s.enviarAtualizacaoParaSombra(sala.ServidorSombra, msg)
+	sala.mutex.Lock()
+	jogadores := make([]*Cliente, len(sala.Jogadores))
+	copy(jogadores, sala.Jogadores)
+	sombraAddr := sala.ServidorSombra
+	sala.mutex.Unlock()
+
+	for _, jogador := range jogadores {
+		if s.getClienteLocal(jogador.ID) != nil {
+			s.publicarParaCliente(jogador.ID, msg)
+		} else {
+			if sombraAddr != "" {
+				go s.notificarJogadorRemoto(sombraAddr, jogador.ID, msg)
+			}
+		}
 	}
 }
 
@@ -2726,9 +2920,20 @@ func (s *Servidor) finalizarPartida(sala *Sala) {
 		Dados:   mustJSON(protocolo.DadosFimDeJogo{VencedorNome: vencedorFinal, SalaID: sala.ID}),
 	}
 
-	s.publicarEventoPartida(sala.ID, msg)
-	if sala.ServidorSombra != "" {
-		s.enviarAtualizacaoParaSombra(sala.ServidorSombra, msg)
+	sala.mutex.Lock()
+	jogadores := make([]*Cliente, len(sala.Jogadores))
+	copy(jogadores, sala.Jogadores)
+	sombraAddr := sala.ServidorSombra
+	sala.mutex.Unlock()
+
+	for _, jogador := range jogadores {
+		if s.getClienteLocal(jogador.ID) != nil {
+			s.publicarParaCliente(jogador.ID, msg)
+		} else {
+			if sombraAddr != "" {
+				go s.notificarJogadorRemoto(sombraAddr, jogador.ID, msg)
+			}
+		}
 	}
 }
 
@@ -2766,17 +2971,31 @@ func (s *Servidor) enviarAtualizacaoParaSombra(sombraAddr string, msg protocolo.
 	}
 }
 
-// broadcastChat envia uma mensagem de chat para todos na sala
-func (s *Servidor) broadcastChat(sala *Sala, texto, remetente string) {
-	msg := protocolo.Mensagem{
-		Comando: "RECEBER_CHAT",
+// broadcastChat envia uma mensagem de chat para todos na sala, local ou remotamente.
+func (s *Servidor) broadcastChat(sala *Sala, texto, remetenteNome string) {
+	sala.mutex.Lock()
+	jogadores := make([]*Cliente, len(sala.Jogadores))
+	copy(jogadores, sala.Jogadores)
+	sombraAddr := sala.ServidorSombra
+	sala.mutex.Unlock()
+
+	msgChat := protocolo.Mensagem{
+		Comando: "CHAT_RECEBIDO",
 		Dados: mustJSON(protocolo.DadosReceberChat{
-			NomeJogador: remetente,
+			NomeJogador: remetenteNome,
 			Texto:       texto,
 		}),
 	}
 
-	s.publicarEventoPartida(sala.ID, msg)
+	for _, jogador := range jogadores {
+		if s.getClienteLocal(jogador.ID) != nil {
+			s.publicarParaCliente(jogador.ID, msgChat)
+		} else {
+			if sombraAddr != "" {
+				go s.notificarJogadorRemoto(sombraAddr, jogador.ID, msgChat)
+			}
+		}
+	}
 }
 
 // ==================== LÓGICA DE TROCA DE CARTAS ====================
@@ -2896,6 +3115,17 @@ func (s *Servidor) criarEstadoDaSala(sala *Sala) *EstadoPartida {
 		SalaID: sala.ID,
 		Estado: sala.Estado,
 	}
+}
+
+func (s *Servidor) notificarErroPartida(clienteID, mensagem, salaID string) {
+	dados := protocolo.DadosErro{Mensagem: mensagem}
+	msg := protocolo.Mensagem{
+		Comando: "ERRO_JOGADA",
+		Dados:   mustJSON(dados),
+	}
+	// O erro é publicado no tópico de eventos da partida para que ambos os jogadores possam vê-lo, se necessário,
+	// ou apenas para o cliente específico. Optarei por notificar apenas o cliente que cometeu o erro.
+	s.publicarParaCliente(clienteID, msg)
 }
 
 // ==================== UTILITÁRIOS ====================
