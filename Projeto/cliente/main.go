@@ -276,6 +276,11 @@ func handleEventoPartida(client mqtt.Client, msg mqtt.Message) {
 		return
 	}
 
+	// --- ADICIONE ESTE LOG PARA DEPURAR ---
+	log.Printf("[DEBUG] Mensagem MQTT recebida no tópico da partida: %s", msg.Topic())
+	log.Printf("[DEBUG] Mensagem decodificada: %+v", mensagem)
+	// --- FIM DA ADIÇÃO ---
+
 	switch mensagem.Comando {
 	case "PARTIDA_INICIADA":
 		var dados map[string]string
@@ -334,6 +339,20 @@ func handleEventoPartida(client mqtt.Client, msg mqtt.Message) {
 		fmt.Printf("╚═══════════════════════════════════════╝\n")
 		fmt.Print("> ")
 
+	// --- ADICIONE ESTE CASE ---
+	case "CHAT_RECEBIDO": // Ou "RECEBER_CHAT" se o servidor estiver a enviar isso
+		var dados protocolo.DadosReceberChat
+		if err := json.Unmarshal(mensagem.Dados, &dados); err == nil {
+			prefixo := dados.NomeJogador
+			if dados.NomeJogador == meuNome {
+				prefixo = "[VOCÊ]"
+			}
+			// Usa \r para potencialmente limpar a linha atual antes de imprimir
+			fmt.Printf("\r💬 %s: %s\n> ", prefixo, dados.Texto)
+		} else {
+			log.Printf("Erro ao decodificar dados do chat: %v", err)
+		}
+	// --- FIM DA ADIÇÃO ---
 	case "RECEBER_CHAT":
 		var dados protocolo.DadosReceberChat
 		json.Unmarshal(mensagem.Dados, &dados)
@@ -343,6 +362,10 @@ func handleEventoPartida(client mqtt.Client, msg mqtt.Message) {
 			prefixo = "[VOCÊ]"
 		}
 		fmt.Printf("\n💬 %s: %s\n> ", prefixo, dados.Texto)
+
+	default: // Adiciona um caso default para debugging
+		log.Printf("[DEBUG] Comando de partida não reconhecido: %s", mensagem.Comando)
+		fmt.Print("> ") // Garante que o prompt aparece
 	}
 }
 
