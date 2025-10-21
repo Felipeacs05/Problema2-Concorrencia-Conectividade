@@ -1344,43 +1344,67 @@ func compararCartas(c1, c2 Carta) int {
 
 // notificarAguardandoOponente notifica que está aguardando o oponente jogar
 func (s *Servidor) notificarAguardandoOponente(sala *tipos.Sala) {
-	msg := protocolo.Mensagem{
-		Comando: "ATUALIZACAO_JOGO",
-		Dados: seguranca.MustJSON(protocolo.DadosAtualizacaoJogo{
-			MensagemDoTurno: "Aguardando oponente jogar...",
-			NumeroRodada:    sala.NumeroRodada,
-			UltimaJogada:    make(map[string]Carta), // Esconde cartas até ambos jogarem
-			SalaID:          sala.ID,                // Inclui o SalaID para a Sombra
-		}),
-	}
+	// IMPORTANTE: Esta função assume que o `sala.Mutex` JÁ ESTÁ BLOQUEADO pela função que a chamou.
+	log.Printf("[NOTIFICACAO:%s] Notificando jogadores para aguardar oponente.", sala.ID)
 
-	sala.Mutex.Lock()
 	jogadores := make([]*tipos.Cliente, len(sala.Jogadores))
 	copy(jogadores, sala.Jogadores)
 	sombraAddr := sala.ServidorSombra
-	sala.Mutex.Unlock()
+	proximoAJogarID := sala.TurnoDe
+
+	// Mensagem para o jogador que acabou de jogar (e não é o próximo)
+	msgAguarde := protocolo.Mensagem{
+		Comando: "ATUALIZACAO_JOGO",
+		Dados: seguranca.MustJSON(protocolo.DadosAtualizacaoJogo{
+			MensagemDoTurno: "Você jogou. Aguardando oponente...",
+		}),
+	}
+
+	// Mensagem para o próximo jogador
+	msgSuaVez := protocolo.Mensagem{
+		Comando: "ATUALIZACAO_JOGO",
+		Dados: seguranca.MustJSON(protocolo.DadosAtualizacaoJogo{
+			MensagemDoTurno: "Seu oponente jogou. É a sua vez!",
+		}),
+	}
 
 	for _, jogador := range jogadores {
-		if s.getClienteLocal(jogador.ID) != nil {
-			s.publicarParaCliente(jogador.ID, msg)
+		var msg protocolo.Mensagem
+		if jogador.ID == proximoAJogarID {
+			msg = msgSuaVez
 		} else {
-			if sombraAddr != "" {
-				go s.notificarJogadorRemoto(sombraAddr, jogador.ID, msg)
-			}
+			msg = msgAguarde
+		}
+
+		if s.getClienteLocal(jogador.ID) != nil {
+			log.Printf("[NOTIFICACAO:%s] Enviando para jogador local %s", sala.ID, jogador.ID)
+			s.publicarParaCliente(jogador.ID, msg)
+		} else if sombraAddr != "" {
+			log.Printf("[NOTIFICACAO:%s] Enviando para jogador remoto %s via sombra %s", sala.ID, jogador.ID, sombraAddr)
+			go s.notificarJogadorRemoto(sombraAddr, jogador.ID, msg)
 		}
 	}
 }
 
 // notificarResultadoJogada notifica o resultado de uma jogada
 func (s *Servidor) notificarResultadoJogada(sala *tipos.Sala, vencedorJogada string) {
-	// Cria contagem de cartas
+	// IMPORTANTE: Esta função assume que o `sala.Mutex` JÁ ESTÁ BLOQUEADO pela função que a chamou (resolverJogada).
+	log.Printf("[NOTIFICACAO:%s] Notificando resultado da jogada. Vencedor: %s", sala.ID, vencedorJogada)
+
+	jogadores := make([]*tipos.Cliente, len(sala.Jogadores))
+	copy(jogadores, sala.Jogadores)
+	sombraAddr := sala.ServidorSombra
+
+	// Cria contagem de cartas (dentro do lock existente)
 	contagemCartas := make(map[string]int)
-	for _, j := range sala.Jogadores {
+	for _, j := range jogadores {
+		// Acesso ao inventário de um jogador de outra goroutine requer seu próprio lock
 		j.Mutex.Lock()
 		contagemCartas[j.Nome] = len(j.Inventario)
 		j.Mutex.Unlock()
 	}
 
+	// Cria a mensagem base
 	msg := protocolo.Mensagem{
 		Comando: "ATUALIZACAO_JOGO",
 		Dados: seguranca.MustJSON(protocolo.DadosAtualizacaoJogo{
@@ -1389,25 +1413,15 @@ func (s *Servidor) notificarResultadoJogada(sala *tipos.Sala, vencedorJogada str
 			ContagemCartas:  contagemCartas,
 			UltimaJogada:    sala.CartasNaMesa,
 			VencedorJogada:  vencedorJogada,
-			PontosRodada:    sala.PontosRodada,
-			PontosPartida:   sala.PontosPartida,
-			SalaID:          sala.ID, // Inclui o SalaID para a Sombra
+			SalaID:          sala.ID,
 		}),
 	}
-
-	sala.Mutex.Lock()
-	jogadores := make([]*tipos.Cliente, len(sala.Jogadores))
-	copy(jogadores, sala.Jogadores)
-	sombraAddr := sala.ServidorSombra
-	sala.Mutex.Unlock()
 
 	for _, jogador := range jogadores {
 		if s.getClienteLocal(jogador.ID) != nil {
 			s.publicarParaCliente(jogador.ID, msg)
-		} else {
-			if sombraAddr != "" {
-				go s.notificarJogadorRemoto(sombraAddr, jogador.ID, msg)
-			}
+		} else if sombraAddr != "" {
+			go s.notificarJogadorRemoto(sombraAddr, jogador.ID, msg)
 		}
 	}
 }
