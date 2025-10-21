@@ -28,6 +28,7 @@ type ServidorInterface interface {
 // para outras partes do sistema, como a API.
 type ClusterManagerInterface interface {
 	GetServidores() map[string]*tipos.InfoServidor
+	GetServidoresAtivos(meuEndereco string) []string
 	ProcessarHeartbeat(string, map[string]interface{})
 	ProcessarVoto(string, int64) (bool, int64)
 	DeclararLider(string, int64)
@@ -298,6 +299,18 @@ func (m *Manager) GetServidores() map[string]*tipos.InfoServidor {
 		servidores[k] = v
 	}
 	return servidores
+}
+
+func (m *Manager) GetServidoresAtivos(meuEndereco string) []string {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+	ativos := make([]string, 0)
+	for addr, srv := range m.Servidores {
+		if srv.Ativo && addr != meuEndereco {
+			ativos = append(ativos, addr)
+		}
+	}
+	return ativos
 }
 
 func (m *Manager) ProcessarHeartbeat(endereco string, dados map[string]interface{}) {

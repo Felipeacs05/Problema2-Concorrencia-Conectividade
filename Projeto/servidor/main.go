@@ -91,6 +91,7 @@ func (s *Servidor) Run() {
 	// Inicia processos concorrentes
 	// O ClusterManager é iniciado primeiro para que a descoberta comece imediatamente
 	s.ClusterManager.Run()
+	go s.tentarMatchmakingGlobalPeriodicamente() // Inicia a busca proativa
 
 	// A API Server agora recebe o servidor e o cluster manager
 	apiServer := api.NewServer(s.MeuEndereco, s, s.ClusterManager)
@@ -200,6 +201,35 @@ func (s *Servidor) RemoverPrimeiroDaFila() *tipos.Cliente {
 	oponente := s.FilaDeEspera[0]
 	s.FilaDeEspera = s.FilaDeEspera[1:]
 	return oponente
+}
+
+func (s *Servidor) ProcessarComandoRemoto(salaID string, mensagem protocolo.Mensagem) error {
+	s.mutexSalas.RLock()
+	_, ok := s.Salas[salaID]
+	s.mutexSalas.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("sala %s não encontrada no servidor host", salaID)
+	}
+
+	// Extrai o clienteID do payload da mensagem genérica
+	var dadosComClienteID struct {
+		ClienteID string `json:"cliente_id"`
+	}
+	if err := json.Unmarshal(mensagem.Dados, &dadosComClienteID); err != nil {
+		return fmt.Errorf("não foi possível extrair cliente_id do comando remoto: %v", err)
+	}
+
+	// Constrói o comando no formato esperado pelo canal
+	comando := protocolo.Comando{
+		ClienteID: dadosComClienteID.ClienteID,
+		Tipo:      mensagem.Comando,
+		Payload:   mensagem.Dados,
+	}
+
+	// Envia o comando para a goroutine da partida
+	s.ComandosPartida[salaID] <- comando
+	return nil
 }
 
 func (s *Servidor) GetStatusEstoque() (map[string]int, int) {
@@ -492,6 +522,39 @@ func (s *Servidor) publicarEventoPartida(salaID string, msg protocolo.Mensagem) 
 
 // ==================== MATCHMAKING E LÓGICA DE JOGO ====================
 
+func (s *Servidor) tentarMatchmakingGlobalPeriodicamente() {
+	// Aguarda um pouco no início para a rede de servidores se estabilizar
+	time.Sleep(10 * time.Second)
+
+	ticker := time.NewTicker(5 * time.Second) // Tenta a cada 5 segundos
+	defer ticker.Stop()
+
+	for range ticker.C {
+		s.mutexFila.Lock()
+		if len(s.FilaDeEspera) == 0 {
+			s.mutexFila.Unlock()
+			continue // Pula se a fila estiver vazia
+		}
+		// Pega o primeiro jogador sem removê-lo ainda
+		jogadorLocal := s.FilaDeEspera[0]
+		s.mutexFila.Unlock()
+
+		log.Printf("[MATCHMAKING-GLOBAL] Buscando oponente para %s (%s)...", jogadorLocal.Nome, jogadorLocal.ID)
+
+		// Pega a lista de servidores ativos, excluindo a si mesmo
+		servidoresAtivos := s.ClusterManager.GetServidoresAtivos(s.MeuEndereco)
+
+		// Itera sobre os outros servidores para encontrar um oponente
+		for _, addr := range servidoresAtivos {
+			if s.realizarSolicitacaoMatchmaking(addr, jogadorLocal) {
+				// Sucesso! A partida foi formada. O jogador já foi removido da fila pela lógica de sucesso.
+				// A `realizarSolicitacaoMatchmaking` agora precisa remover o jogador da fila em caso de sucesso.
+				break // Para de procurar por este jogador
+			}
+		}
+	}
+}
+
 func (s *Servidor) entrarFila(cliente *tipos.Cliente) {
 	s.mutexFila.Lock()
 	// Tenta encontrar oponente na fila local primeiro
@@ -662,6 +725,9 @@ func (s *Servidor) realizarSolicitacaoMatchmaking(addr string, cliente *tipos.Cl
 
 	if res.PartidaEncontrada {
 		log.Printf("[MATCHMAKING-TX] Partida encontrada no servidor %s! Oponente: %s", addr, res.OponenteNome)
+
+		// A requisição foi bem-sucedida, então removemos nosso cliente da fila local.
+		s.RemoverPrimeiroDaFila()
 
 		// Cria um objeto Cliente para o oponente remoto
 		oponenteRemoto := &tipos.Cliente{

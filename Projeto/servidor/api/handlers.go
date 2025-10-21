@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"jogodistribuido/protocolo"
 	"jogodistribuido/servidor/seguranca"
 	"jogodistribuido/servidor/tipos"
 	"log"
@@ -163,7 +164,25 @@ func (s *Server) handleGetEstoque(c *gin.Context) {
 
 // Handlers de partida
 func (s *Server) handleEncaminharComando(c *gin.Context) {
-	// ... (código a ser movido)
+	var req struct {
+		SalaID  string             `json:"sala_id"`
+		Comando protocolo.Mensagem `json:"comando"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Requisição inválida"})
+		return
+	}
+
+	log.Printf("[ENCAMINHAMENTO_RX] Comando '%s' recebido para a sala %s", req.Comando.Comando, req.SalaID)
+
+	// Injeta o comando no canal da partida para ser processado pelo Host
+	if err := s.servidor.ProcessarComandoRemoto(req.SalaID, req.Comando); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "comando encaminhado para processamento"})
 }
 
 func (s *Server) handleSincronizarEstado(c *gin.Context) {

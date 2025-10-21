@@ -1,10 +1,10 @@
 package api
 
 import (
+	"jogodistribuido/protocolo"
+	"jogodistribuido/servidor/cluster"
 	"jogodistribuido/servidor/tipos"
 	"log"
-
-	"jogodistribuido/servidor/cluster"
 
 	"github.com/gin-gonic/gin"
 )
@@ -20,6 +20,7 @@ type ServidorInterface interface {
 	AtualizarEstadoSalaRemoto(estado tipos.EstadoPartida)
 	CriarSalaRemota(solicitante, oponente *tipos.Cliente)
 	RemoverPrimeiroDaFila() *tipos.Cliente
+	ProcessarComandoRemoto(salaID string, comando protocolo.Mensagem) error
 }
 
 type Server struct {
