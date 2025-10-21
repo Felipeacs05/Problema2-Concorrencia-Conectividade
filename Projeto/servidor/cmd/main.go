@@ -7,13 +7,13 @@ import (
 	"flag"
 	"fmt"
 	"jogodistribuido/protocolo"
-	"jogodistribuido/servidor/api"
-	"jogodistribuido/servidor/cluster"
-	"jogodistribuido/servidor/game"
-	mqttManager "jogodistribuido/servidor/mqtt"
-	"jogodistribuido/servidor/seguranca"
-	"jogodistribuido/servidor/store"
-	"jogodistribuido/servidor/tipos"
+	"jogodistribuido/servidor/internal/api"
+	"jogodistribuido/servidor/internal/cluster"
+	"jogodistribuido/servidor/internal/game"
+	mqttManager "jogodistribuido/servidor/internal/mqtt"
+	"jogodistribuido/servidor/internal/seguranca"
+	"jogodistribuido/servidor/internal/store"
+	"jogodistribuido/servidor/internal/models"
 	"log"
 	"math/rand"
 	"net/http"
@@ -38,7 +38,7 @@ const (
 	JWT_EXPIRATION      = 24 * time.Hour                     // Tokens expiram em 24 horas
 )
 
-// ==================== TIPOS ====================
+// ==================== models ====================
 
 type Carta = protocolo.Carta
 
@@ -55,11 +55,11 @@ type Servidor struct {
 	MQTTManager     mqttManager.MQTTManagerInterface
 
 	// Gerenciamento de Partidas
-	Clientes        map[string]*tipos.Cliente // clienteID -> Cliente
+	Clientes        map[string]*models.Cliente // clienteID -> Cliente
 	mutexClientes   sync.RWMutex
-	Salas           map[string]*tipos.Sala // salaID -> Sala
+	Salas           map[string]*models.Sala // salaID -> Sala
 	mutexSalas      sync.RWMutex
-	FilaDeEspera    []*tipos.Cliente
+	FilaDeEspera    []*models.Cliente
 	mutexFila       sync.Mutex
 	ComandosPartida map[string]chan protocolo.Comando
 	mutexComandos   sync.Mutex
@@ -103,15 +103,15 @@ func (s *Servidor) Run() {
 }
 
 // Interface methods for managers
-func (s *Servidor) GetClientes() map[string]*tipos.Cliente {
+func (s *Servidor) GetClientes() map[string]*models.Cliente {
 	return s.Clientes
 }
 
-func (s *Servidor) GetSalas() map[string]*tipos.Sala {
+func (s *Servidor) GetSalas() map[string]*models.Sala {
 	return s.Salas
 }
 
-func (s *Servidor) GetFilaDeEspera() []*tipos.Cliente {
+func (s *Servidor) GetFilaDeEspera() []*models.Cliente {
 	return s.FilaDeEspera
 }
 
@@ -159,7 +159,7 @@ func (s *Servidor) PublicarEventoPartida(salaID string, msg protocolo.Mensagem) 
 	s.publicarEventoPartida(salaID, msg)
 }
 
-func (s *Servidor) NotificarCompraSucesso(clienteID string, cartas []tipos.Carta) {
+func (s *Servidor) NotificarCompraSucesso(clienteID string, cartas []models.Carta) {
 	_, total := s.Store.GetStatusEstoque()
 	msg := protocolo.Mensagem{
 		Comando: "PACOTE_RESULTADO",
@@ -171,7 +171,7 @@ func (s *Servidor) NotificarCompraSucesso(clienteID string, cartas []tipos.Carta
 	s.publicarParaCliente(clienteID, msg)
 }
 
-func (s *Servidor) AtualizarEstadoSalaRemoto(estado tipos.EstadoPartida) {
+func (s *Servidor) AtualizarEstadoSalaRemoto(estado models.EstadoPartida) {
 	s.mutexSalas.Lock()
 	sala, ok := s.Salas[estado.SalaID]
 	s.mutexSalas.Unlock()
@@ -189,11 +189,11 @@ func (s *Servidor) AtualizarEstadoSalaRemoto(estado tipos.EstadoPartida) {
 	log.Printf("[SYNC_SOMBRA_OK] Sala %s atualizada. Novo estado: %s, Turno de: %s", sala.ID, sala.Estado, sala.TurnoDe)
 }
 
-func (s *Servidor) CriarSalaRemota(solicitante, oponente *tipos.Cliente) {
+func (s *Servidor) CriarSalaRemota(solicitante, oponente *models.Cliente) {
 	s.criarSala(solicitante, oponente)
 }
 
-func (s *Servidor) RemoverPrimeiroDaFila() *tipos.Cliente {
+func (s *Servidor) RemoverPrimeiroDaFila() *models.Cliente {
 	s.mutexFila.Lock()
 	defer s.mutexFila.Unlock()
 	if len(s.FilaDeEspera) == 0 {
@@ -249,9 +249,9 @@ func novoServidor(endereco, broker string) *Servidor {
 		MeuEnderecoHTTP: "http://" + endereco,
 		BrokerMQTT:      broker,
 		Store:           store.NewStore(),
-		Clientes:        make(map[string]*tipos.Cliente),
-		Salas:           make(map[string]*tipos.Sala),
-		FilaDeEspera:    make([]*tipos.Cliente, 0),
+		Clientes:        make(map[string]*models.Cliente),
+		Salas:           make(map[string]*models.Sala),
+		FilaDeEspera:    make([]*models.Cliente, 0),
 		ComandosPartida: make(map[string]chan protocolo.Comando),
 	}
 
@@ -359,7 +359,7 @@ func (s *Servidor) handleClienteLogin(client mqtt.Client, msg mqtt.Message) {
 
 	log.Printf("[LOGIN_DEBUG:%s] Nome válido, criando cliente...", s.ServerID)
 	clienteID := uuid.New().String() // ID permanente
-	novoCliente := &tipos.Cliente{
+	novoCliente := &models.Cliente{
 		ID:         clienteID,
 		Nome:       dados.Nome,
 		Inventario: make([]protocolo.Carta, 0),
@@ -556,7 +556,7 @@ func (s *Servidor) tentarMatchmakingGlobalPeriodicamente() {
 	}
 }
 
-func (s *Servidor) entrarFila(cliente *tipos.Cliente) {
+func (s *Servidor) entrarFila(cliente *models.Cliente) {
 	s.mutexFila.Lock()
 	// Tenta encontrar oponente na fila local primeiro
 	if len(s.FilaDeEspera) > 0 {
@@ -602,7 +602,7 @@ func (s *Servidor) entrarFila(cliente *tipos.Cliente) {
 }
 
 // gerenciarBuscaGlobalPersistente tenta encontrar um oponente global periodicamente.
-func (s *Servidor) gerenciarBuscaGlobalPersistente(cliente *tipos.Cliente) {
+func (s *Servidor) gerenciarBuscaGlobalPersistente(cliente *models.Cliente) {
 	ticker := time.NewTicker(5 * time.Second) // Tenta a cada 5 segundos
 	defer ticker.Stop()
 
@@ -655,7 +655,7 @@ func (s *Servidor) gerenciarBuscaGlobalPersistente(cliente *tipos.Cliente) {
 }
 
 // tentarMatchmakingGlobalAgora faz UMA tentativa de encontrar um oponente global.
-func (s *Servidor) tentarMatchmakingGlobalAgora(cliente *tipos.Cliente) bool {
+func (s *Servidor) tentarMatchmakingGlobalAgora(cliente *models.Cliente) bool {
 	// Busca oponente em outros servidores ATIVOS
 	servidores := s.ClusterManager.GetServidores()
 	servidoresAtivos := make([]string, 0, len(servidores))
@@ -686,7 +686,7 @@ func (s *Servidor) tentarMatchmakingGlobalAgora(cliente *tipos.Cliente) bool {
 }
 
 // realizarSolicitacaoMatchmaking envia uma requisição de oponente para um servidor específico.
-func (s *Servidor) realizarSolicitacaoMatchmaking(addr string, cliente *tipos.Cliente) bool {
+func (s *Servidor) realizarSolicitacaoMatchmaking(addr string, cliente *models.Cliente) bool {
 	log.Printf("[MATCHMAKING-TX] Enviando solicitação para %s", addr)
 	reqBody, _ := json.Marshal(map[string]string{
 		"solicitante_id":   cliente.ID,
@@ -731,7 +731,7 @@ func (s *Servidor) realizarSolicitacaoMatchmaking(addr string, cliente *tipos.Cl
 		s.RemoverPrimeiroDaFila()
 
 		// Cria um objeto Cliente para o oponente remoto
-		oponenteRemoto := &tipos.Cliente{
+		oponenteRemoto := &models.Cliente{
 			ID:   res.OponenteID,
 			Nome: res.OponenteNome,
 		}
@@ -746,7 +746,7 @@ func (s *Servidor) realizarSolicitacaoMatchmaking(addr string, cliente *tipos.Cl
 	return false
 }
 
-func (s *Servidor) criarSala(j1, j2 *tipos.Cliente) {
+func (s *Servidor) criarSala(j1, j2 *models.Cliente) {
 	salaID := uuid.New().String()
 
 	// --- CORREÇÃO: Buscar nomes de forma segura ---
@@ -780,9 +780,9 @@ func (s *Servidor) criarSala(j1, j2 *tipos.Cliente) {
 	// --- FIM DA CORREÇÃO ---
 
 	// O resto da função continua...
-	novaSala := &tipos.Sala{
+	novaSala := &models.Sala{
 		ID:             salaID,
-		Jogadores:      []*tipos.Cliente{cliente1Completo, cliente2Completo}, // Usa os ponteiros completos
+		Jogadores:      []*models.Cliente{cliente1Completo, cliente2Completo}, // Usa os ponteiros completos
 		Estado:         "AGUARDANDO_COMPRA",
 		CartasNaMesa:   make(map[string]Carta),
 		PontosRodada:   make(map[string]int),
@@ -824,7 +824,7 @@ func (s *Servidor) criarSala(j1, j2 *tipos.Cliente) {
 	s.publicarParaCliente(j2.ID, msg2)
 }
 
-func (s *Servidor) processarCompraPacote(clienteID string, sala *tipos.Sala) {
+func (s *Servidor) processarCompraPacote(clienteID string, sala *models.Sala) {
 	// Se não for o líder, faz requisição para o líder
 	souLider := s.ClusterManager.SouLider()
 	lider := s.ClusterManager.GetLider()
@@ -911,7 +911,7 @@ func (s *Servidor) processarCompraPacote(clienteID string, sala *tipos.Sala) {
 	go s.verificarEIniciarPartidaSeProntos(sala)
 }
 
-func (s *Servidor) iniciarPartida(sala *tipos.Sala) {
+func (s *Servidor) iniciarPartida(sala *models.Sala) {
 	sala.Mutex.Lock()
 	sala.Estado = "JOGANDO"
 	// Sorteia quem começa
@@ -930,7 +930,7 @@ func (s *Servidor) iniciarPartida(sala *tipos.Sala) {
 
 // verificarEIniciarPartidaSeProntos verifica se todos compraram e inicia a partida,
 // notificando a Sombra se necessário.
-func (s *Servidor) verificarEIniciarPartidaSeProntos(sala *tipos.Sala) {
+func (s *Servidor) verificarEIniciarPartidaSeProntos(sala *models.Sala) {
 	sala.Mutex.Lock()
 	prontos := len(sala.Prontos)
 	total := len(sala.Jogadores)
@@ -966,7 +966,7 @@ func (s *Servidor) verificarEIniciarPartidaSeProntos(sala *tipos.Sala) {
 }
 
 // encaminharJogadaParaHost encaminha uma jogada da Sombra para o Host via API REST
-func (s *Servidor) encaminharJogadaParaHost(sala *tipos.Sala, clienteID, cartaID string) {
+func (s *Servidor) encaminharJogadaParaHost(sala *models.Sala, clienteID, cartaID string) {
 	sala.Mutex.Lock()
 	host := sala.ServidorHost
 	eventSeq := sala.EventSeq + 1 // Próximo eventSeq
@@ -975,7 +975,7 @@ func (s *Servidor) encaminharJogadaParaHost(sala *tipos.Sala, clienteID, cartaID
 	log.Printf("[SHADOW] Encaminhando jogada de %s para o Host %s (eventSeq: %d)", clienteID, host, eventSeq)
 
 	// Usa o novo endpoint /game/event
-	req := tipos.GameEventRequest{
+	req := models.GameEventRequest{
 		MatchID:   sala.ID,
 		EventSeq:  eventSeq,
 		EventType: "CARD_PLAYED",
@@ -987,7 +987,7 @@ func (s *Servidor) encaminharJogadaParaHost(sala *tipos.Sala, clienteID, cartaID
 	}
 
 	// Gera assinatura
-	event := tipos.GameEvent{
+	event := models.GameEvent{
 		EventSeq:  req.EventSeq,
 		MatchID:   req.MatchID,
 		EventType: req.EventType,
@@ -1027,7 +1027,7 @@ func (s *Servidor) encaminharJogadaParaHost(sala *tipos.Sala, clienteID, cartaID
 }
 
 // promoverSombraAHost promove a Sombra a Host quando o Host original falha
-func (s *Servidor) promoverSombraAHost(sala *tipos.Sala) {
+func (s *Servidor) promoverSombraAHost(sala *models.Sala) {
 	sala.Mutex.Lock()
 	defer sala.Mutex.Unlock()
 
@@ -1052,7 +1052,7 @@ func (s *Servidor) promoverSombraAHost(sala *tipos.Sala) {
 }
 
 // processarJogadaComoHost processa uma jogada quando este servidor é o Host
-func (s *Servidor) processarJogadaComoHost(sala *tipos.Sala, clienteID, cartaID string) *tipos.EstadoPartida {
+func (s *Servidor) processarJogadaComoHost(sala *models.Sala, clienteID, cartaID string) *models.EstadoPartida {
 	log.Printf("[JOGADA_HOST:%s] Entrando em processarJogadaComoHost para cliente %s", sala.ID, clienteID)
 	defer log.Printf("[JOGADA_HOST:%s] Saindo de processarJogadaComoHost", sala.ID)
 
@@ -1076,7 +1076,7 @@ func (s *Servidor) processarJogadaComoHost(sala *tipos.Sala, clienteID, cartaID 
 	currentEventSeq := sala.EventSeq
 
 	// Encontra o cliente
-	var jogador *tipos.Cliente
+	var jogador *models.Cliente
 	var nomeJogador string
 	for _, c := range sala.Jogadores {
 		if c.ID == clienteID {
@@ -1123,7 +1123,7 @@ func (s *Servidor) processarJogadaComoHost(sala *tipos.Sala, clienteID, cartaID 
 	sala.CartasNaMesa[nomeJogador] = carta
 
 	// Registra evento no log
-	event := tipos.GameEvent{
+	event := models.GameEvent{
 		EventSeq:  currentEventSeq,
 		MatchID:   sala.ID,
 		Timestamp: time.Now(),
@@ -1150,7 +1150,7 @@ func (s *Servidor) processarJogadaComoHost(sala *tipos.Sala, clienteID, cartaID 
 	}
 
 	// Cria estado da partida para sincronização
-	estado := &tipos.EstadoPartida{
+	estado := &models.EstadoPartida{
 		SalaID:        sala.ID,
 		Estado:        sala.Estado,
 		CartasNaMesa:  sala.CartasNaMesa,
@@ -1237,8 +1237,8 @@ func (s *Servidor) processarJogadaComoHost(sala *tipos.Sala, clienteID, cartaID 
 }
 
 // replicarEstadoParaShadow replica o estado para o servidor Shadow usando o endpoint /game/replicate
-func (s *Servidor) replicarEstadoParaShadow(shadowAddr string, estado *tipos.EstadoPartida) {
-	req := tipos.GameReplicateRequest{
+func (s *Servidor) replicarEstadoParaShadow(shadowAddr string, estado *models.EstadoPartida) {
+	req := models.GameReplicateRequest{
 		MatchID:  estado.SalaID,
 		EventSeq: estado.EventSeq,
 		State:    *estado,
@@ -1273,7 +1273,7 @@ func (s *Servidor) replicarEstadoParaShadow(shadowAddr string, estado *tipos.Est
 }
 
 // resolverJogada resolve uma jogada quando ambos os jogadores jogaram
-func (s *Servidor) resolverJogada(sala *tipos.Sala) {
+func (s *Servidor) resolverJogada(sala *models.Sala) {
 	if len(sala.Jogadores) != 2 {
 		return
 	}
@@ -1285,7 +1285,7 @@ func (s *Servidor) resolverJogada(sala *tipos.Sala) {
 	c2 := sala.CartasNaMesa[j2.Nome]
 
 	vencedorJogada := "EMPATE"
-	var vencedor *tipos.Cliente
+	var vencedor *models.Cliente
 
 	resultado := compararCartas(c1, c2)
 	if resultado > 0 {
@@ -1335,7 +1335,7 @@ func compararCartas(c1, c2 Carta) int {
 }
 
 // notificarAguardandoOponente notifica que está aguardando o oponente jogar
-func (s *Servidor) notificarAguardandoOponente(sala *tipos.Sala) {
+func (s *Servidor) notificarAguardandoOponente(sala *models.Sala) {
 	msg := protocolo.Mensagem{
 		Comando: "ATUALIZACAO_JOGO",
 		Dados: seguranca.MustJSON(protocolo.DadosAtualizacaoJogo{
@@ -1347,7 +1347,7 @@ func (s *Servidor) notificarAguardandoOponente(sala *tipos.Sala) {
 	}
 
 	sala.Mutex.Lock()
-	jogadores := make([]*tipos.Cliente, len(sala.Jogadores))
+	jogadores := make([]*models.Cliente, len(sala.Jogadores))
 	copy(jogadores, sala.Jogadores)
 	sombraAddr := sala.ServidorSombra
 	sala.Mutex.Unlock()
@@ -1364,7 +1364,7 @@ func (s *Servidor) notificarAguardandoOponente(sala *tipos.Sala) {
 }
 
 // notificarResultadoJogada notifica o resultado de uma jogada
-func (s *Servidor) notificarResultadoJogada(sala *tipos.Sala, vencedorJogada string) {
+func (s *Servidor) notificarResultadoJogada(sala *models.Sala, vencedorJogada string) {
 	// Cria contagem de cartas
 	contagemCartas := make(map[string]int)
 	for _, j := range sala.Jogadores {
@@ -1388,7 +1388,7 @@ func (s *Servidor) notificarResultadoJogada(sala *tipos.Sala, vencedorJogada str
 	}
 
 	sala.Mutex.Lock()
-	jogadores := make([]*tipos.Cliente, len(sala.Jogadores))
+	jogadores := make([]*models.Cliente, len(sala.Jogadores))
 	copy(jogadores, sala.Jogadores)
 	sombraAddr := sala.ServidorSombra
 	sala.Mutex.Unlock()
@@ -1405,7 +1405,7 @@ func (s *Servidor) notificarResultadoJogada(sala *tipos.Sala, vencedorJogada str
 }
 
 // finalizarPartida finaliza uma partida e determina o vencedor
-func (s *Servidor) finalizarPartida(sala *tipos.Sala) {
+func (s *Servidor) finalizarPartida(sala *models.Sala) {
 	sala.Estado = "FINALIZADO"
 
 	vencedorFinal := "EMPATE"
@@ -1428,7 +1428,7 @@ func (s *Servidor) finalizarPartida(sala *tipos.Sala) {
 	}
 
 	sala.Mutex.Lock()
-	jogadores := make([]*tipos.Cliente, len(sala.Jogadores))
+	jogadores := make([]*models.Cliente, len(sala.Jogadores))
 	copy(jogadores, sala.Jogadores)
 	sombraAddr := sala.ServidorSombra
 	sala.Mutex.Unlock()
@@ -1445,7 +1445,7 @@ func (s *Servidor) finalizarPartida(sala *tipos.Sala) {
 }
 
 // sincronizarEstadoComSombra envia o estado atualizado da partida para a Sombra
-func (s *Servidor) sincronizarEstadoComSombra(sombra string, estado *tipos.EstadoPartida) {
+func (s *Servidor) sincronizarEstadoComSombra(sombra string, estado *models.EstadoPartida) {
 	jsonData, _ := json.Marshal(estado)
 	url := fmt.Sprintf("http://%s/partida/sincronizar_estado", sombra)
 
@@ -1479,9 +1479,9 @@ func (s *Servidor) enviarAtualizacaoParaSombra(sombraAddr string, msg protocolo.
 }
 
 // broadcastChat envia uma mensagem de chat para todos na sala, local ou remotamente.
-func (s *Servidor) broadcastChat(sala *tipos.Sala, texto, remetenteNome string) {
+func (s *Servidor) broadcastChat(sala *models.Sala, texto, remetenteNome string) {
 	sala.Mutex.Lock()
-	jogadores := make([]*tipos.Cliente, len(sala.Jogadores))
+	jogadores := make([]*models.Cliente, len(sala.Jogadores))
 	copy(jogadores, sala.Jogadores)
 	sombraAddr := sala.ServidorSombra
 	sala.Mutex.Unlock()
@@ -1507,7 +1507,7 @@ func (s *Servidor) broadcastChat(sala *tipos.Sala, texto, remetenteNome string) 
 
 // ==================== LÓGICA DE TROCA DE CARTAS ====================
 
-func (s *Servidor) processarTrocaCartas(sala *tipos.Sala, req *protocolo.TrocarCartasReq) {
+func (s *Servidor) processarTrocaCartas(sala *models.Sala, req *protocolo.TrocarCartasReq) {
 	log.Printf("[TROCA] Proposta recebida na sala %s", sala.ID)
 
 	// Apenas o Host coordena a troca
@@ -1556,7 +1556,7 @@ func (s *Servidor) processarTrocaCartas(sala *tipos.Sala, req *protocolo.TrocarC
 	}
 }
 
-func (s *Servidor) getClienteDaSala(sala *tipos.Sala, clienteID string) *tipos.Cliente {
+func (s *Servidor) getClienteDaSala(sala *models.Sala, clienteID string) *models.Cliente {
 	sala.Mutex.Lock()
 	defer sala.Mutex.Unlock()
 	for _, jogador := range sala.Jogadores {
@@ -1567,7 +1567,7 @@ func (s *Servidor) getClienteDaSala(sala *tipos.Sala, clienteID string) *tipos.C
 	return nil
 }
 
-func (s *Servidor) findCartaNoInventario(cliente *tipos.Cliente, cartaID string) (Carta, int) {
+func (s *Servidor) findCartaNoInventario(cliente *models.Cliente, cartaID string) (Carta, int) {
 	cliente.Mutex.Lock()
 	defer cliente.Mutex.Unlock()
 	for i, c := range cliente.Inventario {
@@ -1601,7 +1601,7 @@ func (s *Servidor) notificarJogadorRemoto(servidor string, clienteID string, msg
 	httpClient.Post(fmt.Sprintf("http://%s/partida/notificar_jogador", servidor), "application/json", bytes.NewBuffer(reqBody))
 }
 
-func (s *Servidor) getClienteLocal(clienteID string) *tipos.Cliente {
+func (s *Servidor) getClienteLocal(clienteID string) *models.Cliente {
 	s.mutexClientes.RLock()
 	defer s.mutexClientes.RUnlock()
 	// Verifica se o cliente está conectado a este servidor
@@ -1612,12 +1612,12 @@ func (s *Servidor) getClienteLocal(clienteID string) *tipos.Cliente {
 	return nil
 }
 
-func (s *Servidor) criarEstadoDaSala(sala *tipos.Sala) *tipos.EstadoPartida {
+func (s *Servidor) criarEstadoDaSala(sala *models.Sala) *models.EstadoPartida {
 	sala.Mutex.Lock()
 	defer sala.Mutex.Unlock()
 
 	// Simplificado para apenas o necessário
-	return &tipos.EstadoPartida{
+	return &models.EstadoPartida{
 		SalaID:  sala.ID,
 		Estado:  sala.Estado,
 		TurnoDe: sala.TurnoDe,
@@ -1644,13 +1644,13 @@ func mustJSON(v interface{}) []byte {
 
 // A estrutura Servidor agora implementa implicitamente a api.ServidorInterface
 
-func (s *Servidor) RegistrarServidor(info *tipos.InfoServidor) {
+func (s *Servidor) RegistrarServidor(info *models.InfoServidor) {
 	// s.mutexServidores.Lock()
 	// s.Servidores[info.Endereco] = info
 	// s.mutexServidores.Unlock()
 }
 
-func (s *Servidor) GetServidores() map[string]*tipos.InfoServidor {
+func (s *Servidor) GetServidores() map[string]*models.InfoServidor {
 	// s.mutexServidores.RLock()
 	// defer s.mutexServidores.RUnlock()
 	// return s.Servidores
@@ -1702,6 +1702,6 @@ func (s *Servidor) EncaminharParaLider(c *gin.Context) {
 	c.DataFromReader(resp.StatusCode, resp.ContentLength, resp.Header.Get("Content-Type"), resp.Body, nil)
 }
 
-func (s *Servidor) FormarPacote() ([]tipos.Carta, error) {
+func (s *Servidor) FormarPacote() ([]models.Carta, error) {
 	return s.Store.FormarPacote(PACOTE_SIZE), nil
 }

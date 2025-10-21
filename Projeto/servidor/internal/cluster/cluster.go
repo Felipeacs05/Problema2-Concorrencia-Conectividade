@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"jogodistribuido/servidor/tipos"
+	"jogodistribuido/servidor/internal/models"
 	"log"
 	"math/rand"
 	"net/http"
@@ -27,12 +27,12 @@ type ServidorInterface interface {
 // ClusterManagerInterface define as operações que o manager do cluster expõe
 // para outras partes do sistema, como a API.
 type ClusterManagerInterface interface {
-	GetServidores() map[string]*tipos.InfoServidor
+	GetServidores() map[string]*models.InfoServidor
 	GetServidoresAtivos(meuEndereco string) []string
 	ProcessarHeartbeat(string, map[string]interface{})
 	ProcessarVoto(string, int64) (bool, int64)
 	DeclararLider(string, int64)
-	RegistrarServidor(*tipos.InfoServidor) map[string]*tipos.InfoServidor
+	RegistrarServidor(*models.InfoServidor) map[string]*models.InfoServidor
 	GetLider() string
 	SouLider() bool
 	Run()
@@ -43,7 +43,7 @@ type Manager struct {
 	servidor ServidorInterface
 	mutex    sync.RWMutex
 	// Campos relacionados com o cluster que estavam no Servidor
-	Servidores      map[string]*tipos.InfoServidor
+	Servidores      map[string]*models.InfoServidor
 	souLider        bool
 	LiderAtual      string
 	TermoAtual      int64
@@ -53,7 +53,7 @@ type Manager struct {
 func NewManager(s ServidorInterface) *Manager {
 	return &Manager{
 		servidor:   s,
-		Servidores: make(map[string]*tipos.InfoServidor),
+		Servidores: make(map[string]*models.InfoServidor),
 	}
 }
 
@@ -81,7 +81,7 @@ func (m *Manager) descobrirServidores() {
 
 func (m *Manager) registrarComPeer(peerAddr string) {
 	endpoint := fmt.Sprintf("http://%s/register", peerAddr)
-	meuInfo := tipos.InfoServidor{
+	meuInfo := models.InfoServidor{
 		Endereco:   m.servidor.GetMeuEndereco(),
 		UltimoPing: time.Now(),
 		Ativo:      true,
@@ -98,7 +98,7 @@ func (m *Manager) registrarComPeer(peerAddr string) {
 		defer resp.Body.Close()
 
 		if resp.StatusCode == http.StatusOK {
-			var peersRecebidos map[string]*tipos.InfoServidor
+			var peersRecebidos map[string]*models.InfoServidor
 			if err := json.NewDecoder(resp.Body).Decode(&peersRecebidos); err == nil {
 				m.mutex.Lock()
 				for addr, info := range peersRecebidos {
@@ -108,7 +108,7 @@ func (m *Manager) registrarComPeer(peerAddr string) {
 					}
 				}
 				// Garante que o peer que respondeu e eu mesmo estamos na lista
-				m.Servidores[peerAddr] = &tipos.InfoServidor{Endereco: peerAddr, Ativo: true, UltimoPing: time.Now()}
+				m.Servidores[peerAddr] = &models.InfoServidor{Endereco: peerAddr, Ativo: true, UltimoPing: time.Now()}
 				m.Servidores[m.servidor.GetMeuEndereco()] = &meuInfo
 				m.mutex.Unlock()
 				log.Printf("Registrado com sucesso no peer %s e lista de servidores atualizada.", peerAddr)
@@ -290,11 +290,11 @@ func (m *Manager) tornarLider() {
 
 // Implementação da ClusterManagerInterface
 
-func (m *Manager) GetServidores() map[string]*tipos.InfoServidor {
+func (m *Manager) GetServidores() map[string]*models.InfoServidor {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
 	// Retorna uma cópia para segurança
-	servidores := make(map[string]*tipos.InfoServidor)
+	servidores := make(map[string]*models.InfoServidor)
 	for k, v := range m.Servidores {
 		servidores[k] = v
 	}
@@ -321,7 +321,7 @@ func (m *Manager) ProcessarHeartbeat(endereco string, dados map[string]interface
 		servidor.UltimoPing = time.Now()
 		servidor.Ativo = true
 	} else {
-		m.Servidores[endereco] = &tipos.InfoServidor{
+		m.Servidores[endereco] = &models.InfoServidor{
 			Endereco:   endereco,
 			UltimoPing: time.Now(),
 			Ativo:      true,
@@ -363,14 +363,14 @@ func (m *Manager) DeclararLider(novoLider string, termo int64) {
 	}
 }
 
-func (m *Manager) RegistrarServidor(novoServidor *tipos.InfoServidor) map[string]*tipos.InfoServidor {
+func (m *Manager) RegistrarServidor(novoServidor *models.InfoServidor) map[string]*models.InfoServidor {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
 	log.Printf("Registrando novo servidor: %s", novoServidor.Endereco)
 
 	// Retorna a lista atual ANTES de adicionar o novo, como no original
-	servidoresAtuais := make(map[string]*tipos.InfoServidor)
+	servidoresAtuais := make(map[string]*models.InfoServidor)
 	for k, v := range m.Servidores {
 		servidoresAtuais[k] = v
 	}

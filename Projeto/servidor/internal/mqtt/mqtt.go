@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"jogodistribuido/protocolo"
-	"jogodistribuido/servidor/seguranca"
-	"jogodistribuido/servidor/tipos"
+	"jogodistribuido/servidor/internal/seguranca"
+	"jogodistribuido/servidor/internal/models"
 	"log"
 	"strings"
 	"sync"
@@ -16,9 +16,9 @@ import (
 
 // MQTTManagerInterface defines the interface for MQTT management
 type MQTTManagerInterface interface {
-	GetClientes() map[string]*tipos.Cliente
-	GetSalas() map[string]*tipos.Sala
-	GetFilaDeEspera() []*tipos.Cliente
+	GetClientes() map[string]*models.Cliente
+	GetSalas() map[string]*models.Sala
+	GetFilaDeEspera() []*models.Cliente
 	GetComandosPartida() map[string]chan protocolo.Comando
 	GetMeuEndereco() string
 	GetMeuEnderecoHTTP() string
@@ -29,7 +29,7 @@ type MQTTManagerInterface interface {
 	GetGameManager() MQTTGameManagerInterface
 	PublicarParaCliente(string, protocolo.Mensagem)
 	PublicarEventoPartida(string, protocolo.Mensagem)
-	NotificarCompraSucesso(string, []tipos.Carta)
+	NotificarCompraSucesso(string, []models.Carta)
 	GetStatusEstoque() (map[string]int, int)
 }
 
@@ -37,23 +37,23 @@ type MQTTManagerInterface interface {
 type MQTTClusterManagerInterface interface {
 	SouLider() bool
 	GetLider() string
-	GetServidores() map[string]*tipos.InfoServidor
+	GetServidores() map[string]*models.InfoServidor
 }
 
 // MQTTStoreInterface defines the interface for store management in MQTT context
 type MQTTStoreInterface interface {
-	FormarPacote(int) []tipos.Carta
+	FormarPacote(int) []models.Carta
 	GetStatusEstoque() (map[string]int, int)
 }
 
 // MQTTGameManagerInterface defines the interface for game management in MQTT context
 type MQTTGameManagerInterface interface {
-	EntrarFila(*tipos.Cliente)
-	CriarSala(*tipos.Cliente, *tipos.Cliente)
-	ProcessarCompraPacote(string, *tipos.Sala)
-	VerificarEIniciarPartidaSeProntos(*tipos.Sala)
-	IniciarPartida(*tipos.Sala)
-	BroadcastChat(*tipos.Sala, string, string)
+	EntrarFila(*models.Cliente)
+	CriarSala(*models.Cliente, *models.Cliente)
+	ProcessarCompraPacote(string, *models.Sala)
+	VerificarEIniciarPartidaSeProntos(*models.Sala)
+	IniciarPartida(*models.Sala)
+	BroadcastChat(*models.Sala, string, string)
 }
 
 // Manager handles all MQTT-related logic
@@ -120,7 +120,7 @@ func (m *Manager) onConnectionLost(client mqtt.Client, err error) {
 
 // handleDescobertaServidor handles server discovery messages
 func (m *Manager) handleDescobertaServidor(client mqtt.Client, msg mqtt.Message) {
-	var info tipos.InfoServidor
+	var info models.InfoServidor
 	if err := json.Unmarshal(msg.Payload(), &info); err != nil {
 		log.Printf("Erro ao decodificar descoberta de servidor: %v", err)
 		return
@@ -147,10 +147,10 @@ func (m *Manager) handleLogin(client mqtt.Client, msg mqtt.Message) {
 	clienteID := topicParts[1]
 
 	// Create client
-	cliente := &tipos.Cliente{
+	cliente := &models.Cliente{
 		ID:         clienteID,
 		Nome:       loginReq.Nome,
-		Inventario: make([]tipos.Carta, 0),
+		Inventario: make([]models.Carta, 0),
 		Mutex:      sync.Mutex{},
 	}
 

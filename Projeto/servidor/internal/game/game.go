@@ -3,8 +3,8 @@ package game
 import (
 	"fmt"
 	"jogodistribuido/protocolo"
-	"jogodistribuido/servidor/seguranca"
-	"jogodistribuido/servidor/tipos"
+	"jogodistribuido/servidor/internal/seguranca"
+	"jogodistribuido/servidor/internal/models"
 	"log"
 	"sync"
 	"time"
@@ -18,9 +18,9 @@ const (
 
 // GameManagerInterface defines the interface for game management
 type GameManagerInterface interface {
-	GetClientes() map[string]*tipos.Cliente
-	GetSalas() map[string]*tipos.Sala
-	GetFilaDeEspera() []*tipos.Cliente
+	GetClientes() map[string]*models.Cliente
+	GetSalas() map[string]*models.Sala
+	GetFilaDeEspera() []*models.Cliente
 	GetComandosPartida() map[string]chan protocolo.Comando
 	GetMeuEndereco() string
 	GetMeuEnderecoHTTP() string
@@ -30,7 +30,7 @@ type GameManagerInterface interface {
 	GetStore() GameStoreInterface
 	PublicarParaCliente(string, protocolo.Mensagem)
 	PublicarEventoPartida(string, protocolo.Mensagem)
-	NotificarCompraSucesso(string, []tipos.Carta)
+	NotificarCompraSucesso(string, []models.Carta)
 	GetStatusEstoque() (map[string]int, int)
 }
 
@@ -38,12 +38,12 @@ type GameManagerInterface interface {
 type GameClusterManagerInterface interface {
 	SouLider() bool
 	GetLider() string
-	GetServidores() map[string]*tipos.InfoServidor
+	GetServidores() map[string]*models.InfoServidor
 }
 
 // GameStoreInterface defines the interface for store management in game context
 type GameStoreInterface interface {
-	FormarPacote(int) []tipos.Carta
+	FormarPacote(int) []models.Carta
 	GetStatusEstoque() (map[string]int, int)
 }
 
@@ -61,7 +61,7 @@ func NewManager(gi GameManagerInterface) *Manager {
 }
 
 // EntrarFila adds a client to the matchmaking queue
-func (m *Manager) EntrarFila(cliente *tipos.Cliente) {
+func (m *Manager) EntrarFila(cliente *models.Cliente) {
 	fila := m.gameInterface.GetFilaDeEspera()
 
 	// Try to find opponent in local queue first
@@ -83,12 +83,12 @@ func (m *Manager) EntrarFila(cliente *tipos.Cliente) {
 }
 
 // CriarSala creates a new game room with two players
-func (m *Manager) CriarSala(j1, j2 *tipos.Cliente) {
+func (m *Manager) CriarSala(j1, j2 *models.Cliente) {
 	salaID := fmt.Sprintf("%d", time.Now().UnixNano())
 
-	sala := &tipos.Sala{
+	sala := &models.Sala{
 		ID:             salaID,
-		Jogadores:      []*tipos.Cliente{j1, j2},
+		Jogadores:      []*models.Cliente{j1, j2},
 		Prontos:        make(map[string]bool),
 		Estado:         "AGUARDANDO_COMPRAS",
 		ServidorHost:   j1.ID,
@@ -115,12 +115,12 @@ func (m *Manager) CriarSala(j1, j2 *tipos.Cliente) {
 }
 
 // ProcessarCompraPacote handles card package purchase
-func (m *Manager) ProcessarCompraPacote(clienteID string, sala *tipos.Sala) {
+func (m *Manager) ProcessarCompraPacote(clienteID string, sala *models.Sala) {
 	souLider := m.gameInterface.GetClusterManager().SouLider()
 
 	log.Printf("[COMPRAR_DEBUG] Processando compra para cliente %s, souLider: %v", clienteID, souLider)
 
-	cartas := make([]tipos.Carta, 0)
+	cartas := make([]models.Carta, 0)
 
 	if souLider {
 		cartas = m.gameInterface.GetStore().FormarPacote(PACOTE_SIZE)
@@ -177,7 +177,7 @@ func (m *Manager) ProcessarCompraPacote(clienteID string, sala *tipos.Sala) {
 }
 
 // VerificarEIniciarPartidaSeProntos checks if both players are ready and starts the game
-func (m *Manager) VerificarEIniciarPartidaSeProntos(sala *tipos.Sala) {
+func (m *Manager) VerificarEIniciarPartidaSeProntos(sala *models.Sala) {
 	sala.Mutex.Lock()
 	prontos := len(sala.Prontos)
 	totalJogadores := len(sala.Jogadores)
@@ -192,7 +192,7 @@ func (m *Manager) VerificarEIniciarPartidaSeProntos(sala *tipos.Sala) {
 }
 
 // IniciarPartida starts the game
-func (m *Manager) IniciarPartida(sala *tipos.Sala) {
+func (m *Manager) IniciarPartida(sala *models.Sala) {
 	sala.Mutex.Lock()
 	sala.Estado = "EM_JOGO"
 	sala.Mutex.Unlock()
@@ -212,7 +212,7 @@ func (m *Manager) IniciarPartida(sala *tipos.Sala) {
 }
 
 // BroadcastChat handles chat messages
-func (m *Manager) BroadcastChat(sala *tipos.Sala, texto, remetenteNome string) {
+func (m *Manager) BroadcastChat(sala *models.Sala, texto, remetenteNome string) {
 	msg := protocolo.Mensagem{
 		Comando: "CHAT_RECEBIDO",
 		Dados: seguranca.MustJSON(protocolo.DadosReceberChat{
@@ -231,17 +231,17 @@ func (m *Manager) BroadcastChat(sala *tipos.Sala, texto, remetenteNome string) {
 }
 
 // Helper functions
-func (m *Manager) getClienteLocal(clienteID string) *tipos.Cliente {
+func (m *Manager) getClienteLocal(clienteID string) *models.Cliente {
 	clientes := m.gameInterface.GetClientes()
 	return clientes[clienteID]
 }
 
-func (m *Manager) notificarSombra(sala *tipos.Sala, msg protocolo.Mensagem) {
+func (m *Manager) notificarSombra(sala *models.Sala, msg protocolo.Mensagem) {
 	// Implementation would send HTTP request to shadow server
 	log.Printf("Notificando servidor sombra para sala %s", sala.ID)
 }
 
-func (m *Manager) notificarHost(sala *tipos.Sala, msg protocolo.Mensagem) {
+func (m *Manager) notificarHost(sala *models.Sala, msg protocolo.Mensagem) {
 	// Implementation would send HTTP request to host server
 	log.Printf("Notificando servidor host para sala %s", sala.ID)
 }

@@ -3,8 +3,8 @@ package api
 import (
 	"encoding/json"
 	"jogodistribuido/protocolo"
-	"jogodistribuido/servidor/seguranca"
-	"jogodistribuido/servidor/tipos"
+	"jogodistribuido/servidor/internal/seguranca"
+	"jogodistribuido/servidor/internal/models"
 	"log"
 	"net/http"
 	"strings"
@@ -45,7 +45,7 @@ func (s *Server) handleRegister(c *gin.Context) {
 		return
 	}
 
-	var novoServidor tipos.InfoServidor
+	var novoServidor models.InfoServidor
 	// Tenta decodificar diretamente
 	if err := json.Unmarshal(body, &novoServidor); err != nil {
 		// Tenta decodificar como mapa e extrair possíveis campos alternativos
@@ -194,7 +194,7 @@ func (s *Server) handleNotificarJogador(c *gin.Context) {
 }
 
 func (s *Server) handleIniciarRemoto(c *gin.Context) {
-	var estado tipos.EstadoPartida
+	var estado models.EstadoPartida
 	if err := c.ShouldBindJSON(&estado); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Estado da partida inválido"})
 		return
@@ -235,7 +235,7 @@ func (s *Server) handleSolicitarOponente(c *gin.Context) {
 		log.Printf("[MATCHMAKING_RX] Oponente '%s' encontrado localmente para solicitante '%s' de %s", oponente.Nome, req.SolicitanteNome, req.ServidorOrigem)
 
 		// Cria um objeto Cliente para o solicitante remoto
-		solicitante := &tipos.Cliente{
+		solicitante := &models.Cliente{
 			ID:   req.SolicitanteID,
 			Nome: req.SolicitanteNome,
 		}

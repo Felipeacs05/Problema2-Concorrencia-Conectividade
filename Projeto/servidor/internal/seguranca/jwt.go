@@ -6,7 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"jogodistribuido/servidor/tipos"
+	"jogodistribuido/servidor/internal/models"
 	"strings"
 	"time"
 )
@@ -79,13 +79,13 @@ func GenerateHMAC(message, secret string) string {
 }
 
 // SignEvent assina um evento de jogo
-func SignEvent(event *tipos.GameEvent) {
+func SignEvent(event *models.GameEvent) {
 	data := fmt.Sprintf("%d:%s:%s:%s", event.EventSeq, event.MatchID, event.EventType, event.PlayerID)
 	event.Signature = GenerateHMAC(data, JWT_SECRET)
 }
 
 // VerifyEventSignature verifica a assinatura de um evento
-func VerifyEventSignature(event *tipos.GameEvent) bool {
+func VerifyEventSignature(event *models.GameEvent) bool {
 	data := fmt.Sprintf("%d:%s:%s:%s", event.EventSeq, event.MatchID, event.EventType, event.PlayerID)
 	expectedSig := GenerateHMAC(data, JWT_SECRET)
 	return event.Signature == expectedSig

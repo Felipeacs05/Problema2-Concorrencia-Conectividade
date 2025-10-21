@@ -2,8 +2,8 @@ package api
 
 import (
 	"jogodistribuido/protocolo"
-	"jogodistribuido/servidor/cluster"
-	"jogodistribuido/servidor/tipos"
+	"jogodistribuido/servidor/internal/cluster"
+	"jogodistribuido/servidor/internal/models"
 	"log"
 
 	"github.com/gin-gonic/gin"
@@ -12,14 +12,14 @@ import (
 // ServidorInterface define as operações que a API pode precisar do Servidor principal (não relacionadas a cluster)
 type ServidorInterface interface {
 	EncaminharParaLider(*gin.Context)
-	FormarPacote() ([]tipos.Carta, error)
-	NotificarCompraSucesso(string, []tipos.Carta)
+	FormarPacote() ([]models.Carta, error)
+	NotificarCompraSucesso(string, []models.Carta)
 	GetStatusEstoque() (map[string]int, int)
-	GetFilaDeEspera() []*tipos.Cliente
+	GetFilaDeEspera() []*models.Cliente
 	GetMeuEndereco() string
-	AtualizarEstadoSalaRemoto(estado tipos.EstadoPartida)
-	CriarSalaRemota(solicitante, oponente *tipos.Cliente)
-	RemoverPrimeiroDaFila() *tipos.Cliente
+	AtualizarEstadoSalaRemoto(estado models.EstadoPartida)
+	CriarSalaRemota(solicitante, oponente *models.Cliente)
+	RemoverPrimeiroDaFila() *models.Cliente
 	ProcessarComandoRemoto(salaID string, comando protocolo.Mensagem) error
 }
 

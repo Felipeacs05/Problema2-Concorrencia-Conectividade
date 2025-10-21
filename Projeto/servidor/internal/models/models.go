@@ -1,4 +1,4 @@
-package tipos
+package models
 
 import (
 	"jogodistribuido/protocolo"

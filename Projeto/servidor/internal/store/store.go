@@ -1,7 +1,7 @@
 package store
 
 import (
-	"jogodistribuido/servidor/tipos"
+	"jogodistribuido/servidor/internal/models"
 	"log"
 	"math/rand"
 	"sync"
@@ -9,20 +9,20 @@ import (
 
 // StoreInterface define as operações que o Store de cartas expõe.
 type StoreInterface interface {
-	FormarPacote(tamanho int) []tipos.Carta
+	FormarPacote(tamanho int) []models.Carta
 	GetStatusEstoque() (map[string]int, int)
 }
 
 // Store gerencia o estoque global de cartas.
 type Store struct {
 	mutex   sync.RWMutex
-	Estoque map[string][]tipos.Carta
+	Estoque map[string][]models.Carta
 }
 
 // NewStore cria e inicializa um novo Store.
 func NewStore() *Store {
 	s := &Store{
-		Estoque: make(map[string][]tipos.Carta),
+		Estoque: make(map[string][]models.Carta),
 	}
 	s.inicializarEstoque()
 	return s
@@ -41,31 +41,31 @@ func (s *Store) inicializarEstoque() {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	s.Estoque = map[string][]tipos.Carta{
-		"C": make([]tipos.Carta, 0),
-		"U": make([]tipos.Carta, 0),
-		"R": make([]tipos.Carta, 0),
-		"L": make([]tipos.Carta, 0),
+	s.Estoque = map[string][]models.Carta{
+		"C": make([]models.Carta, 0),
+		"U": make([]models.Carta, 0),
+		"R": make([]models.Carta, 0),
+		"L": make([]models.Carta, 0),
 	}
 
-	tiposCartas := []string{
+	modelsCartas := []string{
 		"Dragão", "Guerreiro", "Mago", "Anjo", "Demônio", "Fênix", "Titan", "Sereia",
 		"Lobo", "Águia", "Leão", "Tigre", "Cavaleiro", "Arqueiro", "Bárbaro", "Paladino",
 	}
 	naipes := []string{"♠", "♥", "♦", "♣"}
 
-	for _, nome := range tiposCartas {
+	for _, nome := range modelsCartas {
 		for i := 0; i < 100; i++ { // Comuns
-			s.Estoque["C"] = append(s.Estoque["C"], tipos.Carta{ID: randomString(5), Nome: nome, Naipe: naipes[rand.Intn(len(naipes))], Valor: 1 + rand.Intn(50), Raridade: "C"})
+			s.Estoque["C"] = append(s.Estoque["C"], models.Carta{ID: randomString(5), Nome: nome, Naipe: naipes[rand.Intn(len(naipes))], Valor: 1 + rand.Intn(50), Raridade: "C"})
 		}
 		for i := 0; i < 50; i++ { // Incomuns
-			s.Estoque["U"] = append(s.Estoque["U"], tipos.Carta{ID: randomString(5), Nome: nome, Naipe: naipes[rand.Intn(len(naipes))], Valor: 51 + rand.Intn(30), Raridade: "U"})
+			s.Estoque["U"] = append(s.Estoque["U"], models.Carta{ID: randomString(5), Nome: nome, Naipe: naipes[rand.Intn(len(naipes))], Valor: 51 + rand.Intn(30), Raridade: "U"})
 		}
 		for i := 0; i < 20; i++ { // Raras
-			s.Estoque["R"] = append(s.Estoque["R"], tipos.Carta{ID: randomString(5), Nome: nome, Naipe: naipes[rand.Intn(len(naipes))], Valor: 81 + rand.Intn(20), Raridade: "R"})
+			s.Estoque["R"] = append(s.Estoque["R"], models.Carta{ID: randomString(5), Nome: nome, Naipe: naipes[rand.Intn(len(naipes))], Valor: 81 + rand.Intn(20), Raridade: "R"})
 		}
 		for i := 0; i < 5; i++ { // Lendárias
-			s.Estoque["L"] = append(s.Estoque["L"], tipos.Carta{ID: randomString(5), Nome: nome, Naipe: naipes[rand.Intn(len(naipes))], Valor: 101 + rand.Intn(20), Raridade: "L"})
+			s.Estoque["L"] = append(s.Estoque["L"], models.Carta{ID: randomString(5), Nome: nome, Naipe: naipes[rand.Intn(len(naipes))], Valor: 101 + rand.Intn(20), Raridade: "L"})
 		}
 	}
 
@@ -87,11 +87,11 @@ func sampleRaridade() string {
 	return "L"
 }
 
-func (s *Store) FormarPacote(tamanho int) []tipos.Carta {
+func (s *Store) FormarPacote(tamanho int) []models.Carta {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	cartas := make([]tipos.Carta, 0, tamanho)
+	cartas := make([]models.Carta, 0, tamanho)
 	for i := 0; i < tamanho; i++ {
 		raridade := sampleRaridade()
 		ordem := []string{"L", "R", "U", "C"}
@@ -107,7 +107,7 @@ func (s *Store) FormarPacote(tamanho int) []tipos.Carta {
 			start = 3
 		}
 
-		var carta tipos.Carta
+		var carta models.Carta
 		encontrou := false
 		for j := start; j < len(ordem); j++ {
 			r := ordem[j]
@@ -139,10 +139,10 @@ func (s *Store) GetStatusEstoque() (map[string]int, int) {
 	return status, total
 }
 
-func gerarCartaComum() tipos.Carta {
+func gerarCartaComum() models.Carta {
 	nomes := []string{"Guerreiro", "Arqueiro", "Mago", "Cavaleiro", "Ladrão"}
 	naipes := []string{"♠", "♥", "♦", "♣"}
-	return tipos.Carta{
+	return models.Carta{
 		ID:       randomString(5),
 		Nome:     nomes[rand.Intn(len(nomes))],
 		Naipe:    naipes[rand.Intn(len(naipes))],
