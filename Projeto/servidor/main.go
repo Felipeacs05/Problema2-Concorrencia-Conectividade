@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -28,6 +31,8 @@ const (
 	ELEICAO_TIMEOUT     = 10 * time.Second
 	HEARTBEAT_INTERVALO = 3 * time.Second
 	PACOTE_SIZE         = 5
+	JWT_SECRET          = "jogo_distribuido_secret_key_2025" // Chave secreta compartilhada entre servidores
+	JWT_EXPIRATION      = 24 * time.Hour                     // Tokens expiram em 24 horas
 )
 
 // ==================== TIPOS ====================
@@ -45,7 +50,7 @@ type InfoServidor struct {
 type Cliente struct {
 	ID         string
 	Nome       string
-	Inventario []Carta
+	Inventario []protocolo.Carta
 	Sala       *Sala
 	mutex      sync.Mutex
 }
@@ -60,9 +65,22 @@ type Sala struct {
 	PontosPartida  map[string]int
 	NumeroRodada   int
 	Prontos        map[string]bool
-	ServidorHost   string // Servidor responsável pela lógica da partida
-	ServidorSombra string // Servidor backup
+	ServidorHost   string      // Servidor responsável pela lógica da partida
+	ServidorSombra string      // Servidor backup
+	EventSeq       int64       // Sequência de eventos para ordenação
+	EventLog       []GameEvent // Log append-only de eventos da partida
 	mutex          sync.Mutex
+}
+
+// GameEvent representa um evento no log da partida
+type GameEvent struct {
+	EventSeq  int64       `json:"eventSeq"`  // Número sequencial do evento
+	MatchID   string      `json:"matchId"`   // ID da partida
+	Timestamp time.Time   `json:"timestamp"` // Quando o evento ocorreu
+	EventType string      `json:"eventType"` // Tipo do evento (CARD_PLAYED, ROUND_END, etc.)
+	PlayerID  string      `json:"playerId"`  // ID do jogador que gerou o evento
+	Data      interface{} `json:"data"`      // Dados específicos do evento
+	Signature string      `json:"signature"` // Assinatura HMAC do evento
 }
 
 // EstadoPartida representa o estado completo de uma partida (para replicação)
@@ -74,6 +92,45 @@ type EstadoPartida struct {
 	PontosPartida map[string]int   `json:"pontos_partida"`
 	NumeroRodada  int              `json:"numero_rodada"`
 	Prontos       map[string]bool  `json:"prontos"`
+	EventSeq      int64            `json:"eventSeq"` // Sequência de eventos
+	EventLog      []GameEvent      `json:"eventLog"` // Log de eventos
+}
+
+// Estruturas para os novos endpoints REST
+
+// GameStartRequest representa a requisição para iniciar uma partida
+type GameStartRequest struct {
+	MatchID    string   `json:"matchId"`    // ID único da partida
+	HostServer string   `json:"hostServer"` // Servidor Host
+	Players    []Player `json:"players"`    // Lista de jogadores
+	Token      string   `json:"token"`      // Token JWT para autenticação
+}
+
+// Player representa um jogador na partida
+type Player struct {
+	ID     string `json:"id"`     // ID do jogador
+	Nome   string `json:"nome"`   // Nome do jogador
+	Server string `json:"server"` // Servidor ao qual o jogador está conectado
+}
+
+// GameEventRequest representa um evento de jogo
+type GameEventRequest struct {
+	MatchID   string      `json:"matchId"`   // ID da partida
+	EventSeq  int64       `json:"eventSeq"`  // Número sequencial do evento
+	EventType string      `json:"eventType"` // Tipo do evento
+	PlayerID  string      `json:"playerId"`  // ID do jogador
+	Data      interface{} `json:"data"`      // Dados do evento
+	Token     string      `json:"token"`     // Token JWT
+	Signature string      `json:"signature"` // Assinatura HMAC
+}
+
+// GameReplicateRequest representa uma replicação de estado
+type GameReplicateRequest struct {
+	MatchID   string        `json:"matchId"`   // ID da partida
+	EventSeq  int64         `json:"eventSeq"`  // Sequência do evento
+	State     EstadoPartida `json:"state"`     // Estado completo
+	Token     string        `json:"token"`     // Token JWT
+	Signature string        `json:"signature"` // Assinatura HMAC
 }
 
 // Servidor é a estrutura principal que gerencia o servidor distribuído
@@ -233,64 +290,89 @@ func (s *Servidor) handleInfoRequest(client mqtt.Client, msg mqtt.Message) {
 }
 
 func (s *Servidor) handleClienteLogin(client mqtt.Client, msg mqtt.Message) {
-	// EXTRAI O ID TEMPORÁRIO DO CLIENTE DO TÓPICO
-	// Tópico vem como: clientes/{tempID}/login
+	s.mutexClientes.Lock()         // Bloqueia logo no início
+	defer s.mutexClientes.Unlock() // Garante que desbloqueia ao sair
+
 	parts := strings.Split(msg.Topic(), "/")
 	if len(parts) < 3 {
-		log.Printf("Tópico de login inválido: %s", msg.Topic())
+		log.Printf("[LOGIN_ERRO:%s] Tópico de login inválido: %s", s.ServerID, msg.Topic())
 		return
 	}
-	tempClientID := parts[1] // Pega o ID temporário
+	tempClientID := parts[1]
+
+	var mensagem protocolo.Mensagem
+	log.Printf("[LOGIN_DEBUG:%s] Payload recebido: %s", s.ServerID, string(msg.Payload()))
+	if err := json.Unmarshal(msg.Payload(), &mensagem); err != nil {
+		log.Printf("[LOGIN_ERRO:%s] Erro ao decodificar mensagem: %v", s.ServerID, err)
+		return
+	}
 
 	var dados protocolo.DadosLogin
-	if err := json.Unmarshal(msg.Payload(), &dados); err != nil {
-		log.Printf("Erro ao decodificar login: %v", err)
+	if err := json.Unmarshal(mensagem.Dados, &dados); err != nil {
+		log.Printf("[LOGIN_ERRO:%s] Erro ao decodificar dados de login: %v", s.ServerID, err)
+		return
+	}
+	log.Printf("[LOGIN_DEBUG:%s] Dados decodificados - Nome: '%s' (len=%d)", s.ServerID, dados.Nome, len(dados.Nome))
+	if dados.Nome == "" {
+		log.Printf("[LOGIN_ERRO:%s] Nome do jogador vazio recebido no login.", s.ServerID)
+		erroMsg := protocolo.Mensagem{Comando: "ERRO", Dados: mustJSON(protocolo.DadosErro{Mensagem: "Nome de usuário não pode ser vazio."})}
+		s.publicarParaCliente(tempClientID, erroMsg)
 		return
 	}
 
-	// GERA O ID PERMANENTE DO CLIENTE
-	clienteID := uuid.New().String()
+	log.Printf("[LOGIN_DEBUG:%s] Nome válido, criando cliente...", s.ServerID)
+	clienteID := uuid.New().String() // ID permanente
 	novoCliente := &Cliente{
 		ID:         clienteID,
 		Nome:       dados.Nome,
-		Inventario: make([]Carta, 0),
+		Inventario: make([]protocolo.Carta, 0),
 	}
 
-	s.mutexClientes.Lock()
+	log.Printf("[LOGIN_DEBUG:%s] Adicionando cliente ao mapa...", s.ServerID)
 	s.Clientes[clienteID] = novoCliente
-	s.mutexClientes.Unlock()
+	log.Printf("[LOGIN_DEBUG:%s] Cliente adicionado ao mapa.", s.ServerID)
 
-	log.Printf("Cliente %s (ID permanente: %s) conectado", dados.Nome, clienteID)
+	log.Printf("[LOGIN:%s] Cliente %s (ID temp: %s, ID perm: %s) registrado e pronto.", s.ServerID, dados.Nome, tempClientID, clienteID)
 
-	// ENVIA A CONFIRMAÇÃO DE VOLTA PARA O TÓPICO TEMPORÁRIO
+	// Envia confirmação de volta para o TÓPICO TEMPORÁRIO
+	log.Printf("[LOGIN_DEBUG:%s] Enviando resposta LOGIN_OK...", s.ServerID)
 	resposta := protocolo.Mensagem{
 		Comando: "LOGIN_OK",
 		Dados:   mustJSON(map[string]string{"cliente_id": clienteID, "servidor": s.MeuEndereco}),
 	}
-
-	// Usa a função publicarParaCliente, mas com o ID temporário
 	s.publicarParaCliente(tempClientID, resposta)
+	log.Printf("[LOGIN_DEBUG:%s] Resposta LOGIN_OK enviada.", s.ServerID)
 }
 
 func (s *Servidor) handleClienteEntrarFila(client mqtt.Client, msg mqtt.Message) {
 	var dados map[string]string
 	if err := json.Unmarshal(msg.Payload(), &dados); err != nil {
-		log.Printf("Erro ao decodificar entrada na fila: %v", err)
+		log.Printf("[ENTRAR_FILA_ERRO:%s] Erro ao decodificar JSON: %v", s.ServerID, err)
 		return
 	}
+	clienteID := dados["cliente_id"] // ID PERMANENTE enviado pelo cliente
 
-	clienteID := dados["cliente_id"]
-
-	s.mutexClientes.RLock()
+	s.mutexClientes.RLock() // Lock de leitura para verificar
 	cliente, existe := s.Clientes[clienteID]
+	nomeCliente := ""
+	if existe {
+		cliente.mutex.Lock() // Lock no cliente específico para ler o nome
+		nomeCliente = cliente.Nome
+		cliente.mutex.Unlock()
+	}
 	s.mutexClientes.RUnlock()
 
-	if !existe {
-		log.Printf("Cliente %s não encontrado", clienteID)
+	// Verifica se o cliente existe E se o nome não está vazio
+	if !existe || nomeCliente == "" {
+		log.Printf("[ENTRAR_FILA_ERRO:%s] Cliente %s não encontrado ou nome ainda vazio (login pode não ter sido concluído).", s.ServerID, clienteID)
+		// Notificar o cliente seria ideal aqui
+		s.publicarParaCliente(clienteID, protocolo.Mensagem{Comando: "ERRO", Dados: mustJSON(protocolo.DadosErro{Mensagem: "Erro ao entrar na fila. Tente novamente."})})
 		return
 	}
 
-	s.entrarFila(cliente)
+	// Se chegou aqui, o cliente existe e tem nome (login concluído)
+	log.Printf("[ENTRAR_FILA:%s] Cliente %s (%s) encontrado. Adicionando à fila.", s.ServerID, nomeCliente, clienteID)
+	s.entrarFila(cliente) // Chama a função que adiciona à fila e inicia a busca
 }
 
 func (s *Servidor) handleComandoPartida(client mqtt.Client, msg mqtt.Message) {
@@ -385,34 +467,146 @@ func (s *Servidor) publicarEventoPartida(salaID string, msg protocolo.Mensagem) 
 	s.MQTTClient.Publish(topico, 0, false, payload)
 }
 
+// ==================== SEGURANÇA: JWT E ASSINATURAS ====================
+
+// generateJWT gera um token JWT para autenticação entre servidores
+func generateJWT(serverID string) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+
+	payload := map[string]interface{}{
+		"server_id": serverID,
+		"exp":       time.Now().Add(JWT_EXPIRATION).Unix(),
+		"iat":       time.Now().Unix(),
+	}
+	payloadJSON, _ := json.Marshal(payload)
+	payloadB64 := base64.RawURLEncoding.EncodeToString(payloadJSON)
+
+	message := header + "." + payloadB64
+	signature := generateHMAC(message, JWT_SECRET)
+
+	return message + "." + signature
+}
+
+// validateJWT valida um token JWT
+func validateJWT(token string) (string, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return "", fmt.Errorf("token inválido")
+	}
+
+	message := parts[0] + "." + parts[1]
+	expectedSig := generateHMAC(message, JWT_SECRET)
+
+	if parts[2] != expectedSig {
+		return "", fmt.Errorf("assinatura inválida")
+	}
+
+	payloadJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", fmt.Errorf("payload inválido")
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
+		return "", fmt.Errorf("payload JSON inválido")
+	}
+
+	exp, ok := payload["exp"].(float64)
+	if !ok || time.Now().Unix() > int64(exp) {
+		return "", fmt.Errorf("token expirado")
+	}
+
+	serverID, ok := payload["server_id"].(string)
+	if !ok {
+		return "", fmt.Errorf("server_id ausente")
+	}
+
+	return serverID, nil
+}
+
+// generateHMAC gera uma assinatura HMAC-SHA256
+func generateHMAC(message, secret string) string {
+	h := hmac.New(sha256.New, []byte(secret))
+	h.Write([]byte(message))
+	return base64.RawURLEncoding.EncodeToString(h.Sum(nil))
+}
+
+// signEvent assina um evento de jogo
+func signEvent(event *GameEvent) {
+	data := fmt.Sprintf("%d:%s:%s:%s", event.EventSeq, event.MatchID, event.EventType, event.PlayerID)
+	event.Signature = generateHMAC(data, JWT_SECRET)
+}
+
+// verifyEventSignature verifica a assinatura de um evento
+func verifyEventSignature(event *GameEvent) bool {
+	data := fmt.Sprintf("%d:%s:%s:%s", event.EventSeq, event.MatchID, event.EventType, event.PlayerID)
+	expectedSig := generateHMAC(data, JWT_SECRET)
+	return event.Signature == expectedSig
+}
+
+// authMiddleware middleware para validar JWT em requisições REST
+func authMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		authHeader := c.GetHeader("Authorization")
+		if authHeader == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token de autorização ausente"})
+			c.Abort()
+			return
+		}
+
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+		serverID, err := validateJWT(tokenString)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token inválido: " + err.Error()})
+			c.Abort()
+			return
+		}
+
+		c.Set("server_id", serverID)
+		c.Next()
+	}
+}
+
 // ==================== API REST ====================
 
 func (s *Servidor) iniciarAPI() {
 	gin.SetMode(gin.ReleaseMode)
-	router := gin.Default()
+	router := gin.New()        // Usa um router Gin "limpo", sem middlewares padrão
+	router.Use(gin.Recovery()) // Adiciona apenas o middleware essencial de recuperação de pânico
+	// router.Use(gin.Logger()) // Pode descomentar para ver logs detalhados do GIN, se necessário
 
-	// Rotas de descoberta e heartbeat
+	// Rotas públicas (sem autenticação)
 	router.POST("/register", s.handleRegister)
 	router.POST("/heartbeat", s.handleHeartbeat)
 	router.GET("/servers", s.handleGetServers)
 
-	// Rotas de eleição de líder
+	// Rotas de eleição de líder (sem autenticação para compatibilidade)
 	router.POST("/eleicao/solicitar_voto", s.handleSolicitarVoto)
 	router.POST("/eleicao/declarar_lider", s.handleDeclararLider)
 
-	// Rotas de gerenciamento de estoque (apenas líder)
-	router.POST("/estoque/comprar_pacote", s.handleComprarPacote)
-	router.GET("/estoque/status", s.handleStatusEstoque)
+	// Grupo de rotas autenticadas para comunicação cross-server
+	authenticated := router.Group("/")
+	authenticated.Use(authMiddleware())
+	{
+		// === NOVOS ENDPOINTS PADRÃO ===
+		authenticated.POST("/game/start", s.handleGameStart)
+		authenticated.POST("/game/event", s.handleGameEvent)
+		authenticated.POST("/game/replicate", s.handleGameReplicate)
 
-	// Rotas de sincronização de partidas
-	router.POST("/partida/encaminhar_comando", s.handleEncaminharComando)
-	router.POST("/partida/sincronizar_estado", s.handleSincronizarEstado)
-	router.POST("/partida/notificar_jogador", s.handleNotificarJogador)
-	router.POST("/partida/atualizar_estado", s.handleAtualizarEstado)
+		// Rotas de gerenciamento de estoque (apenas líder)
+		authenticated.POST("/estoque/comprar_pacote", s.handleComprarPacote)
+		authenticated.GET("/estoque/status", s.handleStatusEstoque)
 
-	// Rotas de matchmaking global
-	router.POST("/matchmaking/solicitar_oponente", s.handleSolicitarOponente)
-	router.POST("/matchmaking/confirmar_partida", s.handleConfirmarPartida)
+		// Rotas de sincronização de partidas (mantidas para compatibilidade)
+		authenticated.POST("/partida/encaminhar_comando", s.handleEncaminharComando)
+		authenticated.POST("/partida/sincronizar_estado", s.handleSincronizarEstado)
+		authenticated.POST("/partida/notificar_jogador", s.handleNotificarJogador)
+		authenticated.POST("/partida/atualizar_estado", s.handleAtualizarEstado)
+
+		// Rotas de matchmaking global
+		authenticated.POST("/matchmaking/solicitar_oponente", s.handleSolicitarOponente)
+		authenticated.POST("/matchmaking/confirmar_partida", s.handleConfirmarPartida)
+	}
 
 	log.Printf("API REST iniciada em %s", s.MeuEndereco)
 	if err := router.Run(s.MeuEndereco); err != nil {
@@ -771,15 +965,23 @@ func (s *Servidor) handleNotificarJogador(c *gin.Context) {
 		return
 	}
 
-	clienteID := dados["cliente_id"].(string)
-	mensagemJSON := dados["mensagem"].(map[string]interface{})
+	clienteID := dados["cliente_id"].(string)                  // ID do cliente que deve receber
+	mensagemJSON := dados["mensagem"].(map[string]interface{}) // A mensagem completa
+
+	// Verifica se o cliente está realmente conectado a este servidor
+	if s.getClienteLocal(clienteID) == nil {
+		log.Printf("[RETRANSMISSÃO-ERRO] Recebi pedido para notificar cliente %s, mas ele não está conectado aqui.", clienteID)
+		c.JSON(http.StatusNotFound, gin.H{"error": "Cliente não encontrado neste servidor"})
+		return
+	}
 
 	var msg protocolo.Mensagem
 	msgBytes, _ := json.Marshal(mensagemJSON)
 	json.Unmarshal(msgBytes, &msg)
 
-	// Publica a mensagem para o cliente via MQTT
-	s.publicarParaCliente(clienteID, msg)
+	// Publica a mensagem para o cliente local via MQTT
+	log.Printf("[RETRANSMISSÃO] Retransmitindo evento %s para cliente local %s", msg.Comando, clienteID)
+	s.publicarParaCliente(clienteID, msg) // Usa o broker local
 
 	c.JSON(http.StatusOK, gin.H{"status": "notificado"})
 }
@@ -808,43 +1010,81 @@ func (s *Servidor) handleAtualizarEstado(c *gin.Context) {
 }
 
 // ==================== HANDLERS DE MATCHMAKING GLOBAL ====================
-
-// handleSolicitarOponente é chamado por outro servidor procurando um oponente.
 func (s *Servidor) handleSolicitarOponente(c *gin.Context) {
+	log.Printf("[HANDLE_SOLICITAR_OPONENTE-RX:%s] Recebida requisição de %s", s.ServerID, c.Request.RemoteAddr)
+	log.Printf("[HANDLE_SOLICITAR_OPONENTE-RX:%s] Tamanho da fila atual: %d", s.ServerID, len(s.FilaDeEspera))
+
 	var req struct {
 		SolicitanteID   string `json:"solicitante_id"`
 		SolicitanteNome string `json:"solicitante_nome"`
 		ServidorOrigem  string `json:"servidor_origem"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Printf("[HANDLE_SOLICITAR_OPONENTE-RX:%s] Erro no Bind JSON: %v", s.ServerID, err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	log.Printf("[MATCHMAKING-RX] Recebida solicitação de oponente de %s@%s", req.SolicitanteNome, req.ServidorOrigem)
+	log.Printf("[MATCHMAKING-RX:%s] Recebida solicitação de oponente de %s@%s",
+		s.ServerID, req.SolicitanteNome, req.ServidorOrigem)
 
+	var oponenteLocal *Cliente
+
+	// --- BLOCO DE BUSCA SEGURA NA FILA ---
 	s.mutexFila.Lock()
 	if len(s.FilaDeEspera) > 0 {
-		// Oponente encontrado!
-		oponenteLocal := s.FilaDeEspera[0]
-		s.FilaDeEspera = s.FilaDeEspera[1:] // Remove da fila
-		s.mutexFila.Unlock()
+		oponenteLocal = s.FilaDeEspera[0]
 
-		log.Printf("[MATCHMAKING-RX] Oponente local %s encontrado para %s@%s", oponenteLocal.Nome, req.SolicitanteNome, req.ServidorOrigem)
+		// Verifica se o oponente ainda é válido no mapa de clientes
+		s.mutexClientes.RLock()
+		clienteCompleto, ok := s.Clientes[oponenteLocal.ID]
+		s.mutexClientes.RUnlock()
 
-		// Este servidor (que encontrou o oponente) será o Host.
+		nomeOponenteLocal := ""
+		if ok {
+			clienteCompleto.mutex.Lock()
+			nomeOponenteLocal = clienteCompleto.Nome
+			clienteCompleto.mutex.Unlock()
+		}
+
+		if nomeOponenteLocal != "" {
+			// Tudo certo, remove da fila
+			s.FilaDeEspera = s.FilaDeEspera[1:]
+		} else {
+			// Nome vazio: o cliente está inconsistente, não remove da fila
+			log.Printf("[HANDLE_SOLICITAR_OPONENTE-ERRO:%s] Encontrou oponente %s na fila, mas o nome está vazio no mapa principal! Não removendo da fila.",
+				s.ServerID, oponenteLocal.ID)
+			oponenteLocal = nil
+		}
+	}
+	s.mutexFila.Unlock()
+	// --- FIM DO BLOCO DE BUSCA SEGURA ---
+
+	if oponenteLocal != nil {
+		// Re-lê o nome de forma segura para garantir
+		s.mutexClientes.RLock()
+		clienteCompleto, _ := s.Clientes[oponenteLocal.ID]
+		s.mutexClientes.RUnlock()
+		clienteCompleto.mutex.Lock()
+		nomeOponenteLocal := clienteCompleto.Nome
+		clienteCompleto.mutex.Unlock()
+
+		log.Printf("[HANDLE_SOLICITAR_OPONENTE-MATCH!:%s] Oponente local %s (ID: %s) encontrado para %s@%s. A responder com 'true'.",
+			s.ServerID, nomeOponenteLocal, oponenteLocal.ID, req.SolicitanteNome, req.ServidorOrigem)
+
+		// Cria a sala e define o servidor atual como HOST
 		salaID := uuid.New().String()
 		novaSala := &Sala{
 			ID:             salaID,
-			Jogadores:      []*Cliente{oponenteLocal}, // Adiciona jogador local
+			Jogadores:      []*Cliente{oponenteLocal},
 			Estado:         "AGUARDANDO_JOGADORES",
 			CartasNaMesa:   make(map[string]Carta),
 			PontosRodada:   make(map[string]int),
 			PontosPartida:  make(map[string]int),
 			NumeroRodada:   1,
 			Prontos:        make(map[string]bool),
-			ServidorHost:   s.MeuEndereco,      // Eu sou o Host
-			ServidorSombra: req.ServidorOrigem, // O outro servidor é a Sombra
+			ServidorHost:   s.MeuEndereco,
+			ServidorSombra: req.ServidorOrigem,
 		}
 
 		s.mutexSalas.Lock()
@@ -855,15 +1095,15 @@ func (s *Servidor) handleSolicitarOponente(c *gin.Context) {
 		oponenteLocal.Sala = novaSala
 		oponenteLocal.mutex.Unlock()
 
-		// Responde ao servidor solicitante com os detalhes da partida
+		// Responde ao servidor solicitante
 		c.JSON(http.StatusOK, gin.H{
 			"partida_encontrada": true,
 			"sala_id":            salaID,
-			"oponente_nome":      req.SolicitanteNome,
+			"oponente_nome":      nomeOponenteLocal,
 			"servidor_host":      s.MeuEndereco,
 		})
 
-		// Notifica o jogador local
+		// Notifica o jogador local sobre o oponente remoto
 		s.publicarParaCliente(oponenteLocal.ID, protocolo.Mensagem{
 			Comando: "PARTIDA_ENCONTRADA",
 			Dados: mustJSON(protocolo.DadosPartidaEncontrada{
@@ -874,8 +1114,9 @@ func (s *Servidor) handleSolicitarOponente(c *gin.Context) {
 		})
 
 	} else {
-		s.mutexFila.Unlock()
-		log.Printf("[MATCHMAKING-RX] Nenhum oponente local na fila para %s@%s", req.SolicitanteNome, req.ServidorOrigem)
+		// Nenhum oponente disponível
+		log.Printf("[HANDLE_SOLICITAR_OPONENTE-NO_MATCH:%s] Nenhum oponente local válido na fila para %s@%s. A responder com 'false'.",
+			s.ServerID, req.SolicitanteNome, req.ServidorOrigem)
 		c.JSON(http.StatusOK, gin.H{"partida_encontrada": false})
 	}
 }
@@ -932,6 +1173,295 @@ func (s *Servidor) handleConfirmarPartida(c *gin.Context) {
 	log.Printf("[MATCHMAKING-CONFIRM] Jogador remoto %s adicionado à sala %s. A partida pode começar.", req.SolicitanteNome, req.SalaID)
 
 	c.JSON(http.StatusOK, gin.H{"status": "confirmado"})
+}
+
+// ==================== HANDLERS DOS NOVOS ENDPOINTS PADRÃO ====================
+
+// handleGameStart cria uma nova partida e envia o estado inicial ao servidor shadow
+func (s *Servidor) handleGameStart(c *gin.Context) {
+	var req GameStartRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Requisição inválida: " + err.Error()})
+		return
+	}
+
+	log.Printf("[GAME-START] Iniciando partida %s como Host", req.MatchID)
+
+	// Cria a nova sala
+	novaSala := &Sala{
+		ID:             req.MatchID,
+		Jogadores:      make([]*Cliente, 0),
+		Estado:         "AGUARDANDO_COMPRA",
+		CartasNaMesa:   make(map[string]Carta),
+		PontosRodada:   make(map[string]int),
+		PontosPartida:  make(map[string]int),
+		NumeroRodada:   1,
+		Prontos:        make(map[string]bool),
+		ServidorHost:   req.HostServer,
+		ServidorSombra: "",
+		EventSeq:       0,
+		EventLog:       make([]GameEvent, 0),
+	}
+
+	// Adiciona jogadores à sala
+	for _, player := range req.Players {
+		// Cria ou encontra o cliente
+		s.mutexClientes.Lock()
+		cliente, existe := s.Clientes[player.ID]
+		if !existe {
+			cliente = &Cliente{
+				ID:         player.ID,
+				Nome:       player.Nome,
+				Inventario: make([]protocolo.Carta, 0),
+				Sala:       novaSala,
+			}
+			s.Clientes[player.ID] = cliente
+		}
+		s.mutexClientes.Unlock()
+
+		novaSala.Jogadores = append(novaSala.Jogadores, cliente)
+
+		// Define o servidor shadow se o jogador está em servidor diferente
+		if player.Server != req.HostServer && novaSala.ServidorSombra == "" {
+			novaSala.ServidorSombra = player.Server
+		}
+	}
+
+	// Registra a sala
+	s.mutexSalas.Lock()
+	s.Salas[req.MatchID] = novaSala
+	s.mutexSalas.Unlock()
+
+	// Cria evento inicial
+	event := GameEvent{
+		EventSeq:  0,
+		MatchID:   req.MatchID,
+		Timestamp: time.Now(),
+		EventType: "MATCH_START",
+		PlayerID:  "SYSTEM",
+		Data: map[string]interface{}{
+			"host":   req.HostServer,
+			"shadow": novaSala.ServidorSombra,
+		},
+	}
+	signEvent(&event)
+	novaSala.EventLog = append(novaSala.EventLog, event)
+
+	log.Printf("[GAME-START] Partida %s criada. Host: %s, Shadow: %s", req.MatchID, req.HostServer, novaSala.ServidorSombra)
+
+	// Se houver shadow, envia o estado inicial
+	if novaSala.ServidorSombra != "" {
+		go s.enviarEstadoInicialParaShadow(novaSala)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "created",
+		"matchId": req.MatchID,
+		"host":    req.HostServer,
+		"shadow":  novaSala.ServidorSombra,
+	})
+}
+
+// handleGameEvent processa eventos de jogo vindos de jogadores remotos (via Shadow)
+func (s *Servidor) handleGameEvent(c *gin.Context) {
+	var req GameEventRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Requisição inválida: " + err.Error()})
+		return
+	}
+
+	log.Printf("[GAME-EVENT] Recebido evento %d do tipo %s da partida %s", req.EventSeq, req.EventType, req.MatchID)
+
+	// Busca a sala
+	s.mutexSalas.RLock()
+	sala, existe := s.Salas[req.MatchID]
+	s.mutexSalas.RUnlock()
+
+	if !existe {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Partida não encontrada"})
+		return
+	}
+
+	// Verifica se este servidor é o Host
+	sala.mutex.Lock()
+	eHost := sala.ServidorHost == s.MeuEndereco
+	eventSeqAtual := sala.EventSeq
+	sala.mutex.Unlock()
+
+	if !eHost {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Este servidor não é o Host da partida"})
+		return
+	}
+
+	// Valida eventSeq para prevenir replay attacks
+	if req.EventSeq <= eventSeqAtual {
+		log.Printf("[GAME-EVENT] AVISO: Evento desatualizado ou duplicado. Esperado > %d, recebido %d", eventSeqAtual, req.EventSeq)
+		c.JSON(http.StatusConflict, gin.H{"error": "Evento desatualizado ou duplicado"})
+		return
+	}
+
+	// Cria o evento
+	event := GameEvent{
+		EventSeq:  req.EventSeq,
+		MatchID:   req.MatchID,
+		Timestamp: time.Now(),
+		EventType: req.EventType,
+		PlayerID:  req.PlayerID,
+		Data:      req.Data,
+	}
+	signEvent(&event)
+
+	// Verifica a assinatura se fornecida
+	if req.Signature != "" && !verifyEventSignature(&event) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Assinatura inválida"})
+		return
+	}
+
+	// Adiciona ao event log
+	sala.mutex.Lock()
+	sala.EventSeq = req.EventSeq
+	sala.EventLog = append(sala.EventLog, event)
+	sala.mutex.Unlock()
+
+	// Processa o evento baseado no tipo
+	var novoEstado *EstadoPartida
+	switch req.EventType {
+	case "CARD_PLAYED":
+		// Extrai dados da jogada
+		dataMap, ok := req.Data.(map[string]interface{})
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Dados do evento inválidos"})
+			return
+		}
+		cartaID, _ := dataMap["carta_id"].(string)
+		novoEstado = s.processarJogadaComoHost(sala, req.PlayerID, cartaID)
+	default:
+		log.Printf("[GAME-EVENT] Tipo de evento não reconhecido: %s", req.EventType)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":   "processed",
+		"eventSeq": req.EventSeq,
+		"state":    novoEstado,
+	})
+}
+
+// handleGameReplicate recebe replicação de estado do Host (quando este servidor é Shadow)
+func (s *Servidor) handleGameReplicate(c *gin.Context) {
+	var req GameReplicateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Requisição inválida: " + err.Error()})
+		return
+	}
+
+	log.Printf("[GAME-REPLICATE] Recebendo replicação da partida %s, eventSeq %d", req.MatchID, req.EventSeq)
+
+	// Busca ou cria a sala
+	s.mutexSalas.Lock()
+	sala, existe := s.Salas[req.MatchID]
+	if !existe {
+		// Cria sala se não existir (recuperação após falha)
+		sala = &Sala{
+			ID:             req.MatchID,
+			Jogadores:      make([]*Cliente, 0),
+			Estado:         req.State.Estado,
+			CartasNaMesa:   req.State.CartasNaMesa,
+			PontosRodada:   req.State.PontosRodada,
+			PontosPartida:  req.State.PontosPartida,
+			NumeroRodada:   req.State.NumeroRodada,
+			Prontos:        req.State.Prontos,
+			ServidorHost:   "",
+			ServidorSombra: s.MeuEndereco,
+			EventSeq:       req.EventSeq,
+			EventLog:       req.State.EventLog,
+		}
+		s.Salas[req.MatchID] = sala
+		log.Printf("[GAME-REPLICATE] Sala %s criada como Shadow", req.MatchID)
+	}
+	s.mutexSalas.Unlock()
+
+	// Atualiza o estado
+	sala.mutex.Lock()
+
+	// Valida eventSeq - só aceita eventos mais recentes
+	if req.EventSeq <= sala.EventSeq {
+		sala.mutex.Unlock()
+		log.Printf("[GAME-REPLICATE] AVISO: Replicação desatualizada. Atual: %d, recebido: %d", sala.EventSeq, req.EventSeq)
+		c.JSON(http.StatusOK, gin.H{"status": "ignored", "reason": "outdated"})
+		return
+	}
+
+	// Atualiza o estado da sala
+	sala.Estado = req.State.Estado
+	sala.CartasNaMesa = req.State.CartasNaMesa
+	sala.PontosRodada = req.State.PontosRodada
+	sala.PontosPartida = req.State.PontosPartida
+	sala.NumeroRodada = req.State.NumeroRodada
+	sala.Prontos = req.State.Prontos
+	sala.EventSeq = req.EventSeq
+
+	// Atualiza event log (merge)
+	if len(req.State.EventLog) > len(sala.EventLog) {
+		sala.EventLog = req.State.EventLog
+	}
+
+	sala.mutex.Unlock()
+
+	log.Printf("[GAME-REPLICATE] Estado da partida %s sincronizado com sucesso", req.MatchID)
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":   "replicated",
+		"eventSeq": req.EventSeq,
+	})
+}
+
+// enviarEstadoInicialParaShadow envia o estado inicial da partida para o servidor Shadow
+func (s *Servidor) enviarEstadoInicialParaShadow(sala *Sala) {
+	if sala.ServidorSombra == "" || sala.ServidorSombra == s.MeuEndereco {
+		return
+	}
+
+	sala.mutex.Lock()
+	estado := EstadoPartida{
+		SalaID:        sala.ID,
+		Estado:        sala.Estado,
+		CartasNaMesa:  sala.CartasNaMesa,
+		PontosRodada:  sala.PontosRodada,
+		PontosPartida: sala.PontosPartida,
+		NumeroRodada:  sala.NumeroRodada,
+		Prontos:       sala.Prontos,
+		EventSeq:      sala.EventSeq,
+		EventLog:      sala.EventLog,
+	}
+	sala.mutex.Unlock()
+
+	req := GameReplicateRequest{
+		MatchID:  sala.ID,
+		EventSeq: estado.EventSeq,
+		State:    estado,
+		Token:    generateJWT(s.ServerID),
+	}
+
+	// Gera assinatura
+	data := fmt.Sprintf("%s:%d", req.MatchID, req.EventSeq)
+	req.Signature = generateHMAC(data, JWT_SECRET)
+
+	jsonData, _ := json.Marshal(req)
+	url := fmt.Sprintf("http://%s/game/replicate", sala.ServidorSombra)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Printf("[GAME-START] Erro ao enviar estado inicial para Shadow %s: %v", sala.ServidorSombra, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		log.Printf("[GAME-START] Estado inicial enviado com sucesso para Shadow %s", sala.ServidorSombra)
+	} else {
+		log.Printf("[GAME-START] Shadow %s retornou status %d", sala.ServidorSombra, resp.StatusCode)
+	}
 }
 
 // ==================== LÓGICA DE ELEIÇÃO DE LÍDER ====================
@@ -1438,36 +1968,66 @@ func (s *Servidor) entrarFila(cliente *Cliente) {
 		Dados:   mustJSON(map[string]string{"mensagem": "Procurando oponente em todos os servidores..."}),
 	})
 
-	// Dispara a busca por oponente em outros servidores em uma goroutine
-	go s.tentarMatchmakingGlobal(cliente)
+	log.Printf("[MATCHMAKING] Iniciando busca global persistente para %s (%s)", cliente.Nome, cliente.ID)
+	go s.gerenciarBuscaGlobalPersistente(cliente)
 }
 
-// tentarMatchmakingGlobal é a rotina que busca oponentes em outros servidores.
-func (s *Servidor) tentarMatchmakingGlobal(cliente *Cliente) {
-	// Delay para dar chance ao matchmaking local de outros servidores
-	time.Sleep(2 * time.Second)
+// gerenciarBuscaGlobalPersistente tenta encontrar um oponente global periodicamente.
+func (s *Servidor) gerenciarBuscaGlobalPersistente(cliente *Cliente) {
+	ticker := time.NewTicker(5 * time.Second) // Tenta a cada 5 segundos
+	defer ticker.Stop()
 
-	// Garante que o cliente não encontrou uma partida enquanto esperava
-	s.mutexFila.Lock()
-	aindaNaFila := false
-	for i, c := range s.FilaDeEspera {
-		if c.ID == cliente.ID {
-			// Remove temporariamente para não ser encontrado por outro processo
-			s.FilaDeEspera = append(s.FilaDeEspera[:i], s.FilaDeEspera[i+1:]...)
-			aindaNaFila = true
-			break
+	// Cria um contexto para poder cancelar esta goroutine se o cliente sair/for matchado
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // Garante que o cancelamento seja chamado ao sair
+
+	// Armazena a função de cancelamento para uso posterior (ex: quando o cliente for matchado localmente)
+	cliente.mutex.Lock()
+	// Assumindo que você adicione um campo `cancelBuscaGlobal context.CancelFunc` à struct Cliente
+	// cliente.cancelBuscaGlobal = cancel // (Descomente se adicionar o campo)
+	cliente.mutex.Unlock()
+
+	for {
+		select {
+		case <-ticker.C:
+			// 1. Verifica se o cliente AINDA está na fila deste servidor
+			s.mutexFila.Lock()
+			aindaNaFila := false
+			for _, c := range s.FilaDeEspera {
+				if c.ID == cliente.ID {
+					aindaNaFila = true
+					break
+				}
+			}
+			s.mutexFila.Unlock()
+
+			if !aindaNaFila {
+				log.Printf("[MATCHMAKING-PERSIST] Cliente %s (%s) não está mais na fila local. Parando busca global.", cliente.Nome, cliente.ID)
+				return // Cliente já foi matchado (localmente ou por outra tentativa), sai da rotina
+			}
+
+			// 2. Tenta encontrar um oponente global AGORA (sem remover da fila!)
+			log.Printf("[MATCHMAKING-PERSIST] Tentando busca global para %s (%s)", cliente.Nome, cliente.ID)
+			encontrou := s.tentarMatchmakingGlobalAgora(cliente)
+
+			if encontrou {
+				log.Printf("[MATCHMAKING-PERSIST] Busca global para %s (%s) encontrou partida! A busca será finalizada.", cliente.Nome, cliente.ID)
+				// A remoção da fila agora é feita dentro de `realizarSolicitacaoMatchmaking` no momento da confirmação.
+				// Apenas precisamos parar a busca.
+				return // Encontrou, sai da rotina
+			}
+			// Se não encontrou, o loop continua na próxima iteração do ticker.
+
+		case <-ctx.Done():
+			log.Printf("[MATCHMAKING-PERSIST] Busca global para %s (%s) cancelada.", cliente.Nome, cliente.ID)
+			return // Sai da rotina se o contexto for cancelado
 		}
 	}
-	s.mutexFila.Unlock()
+}
 
-	if !aindaNaFila {
-		log.Printf("[MATCHMAKING-TX] Cliente %s já encontrou partida, cancelando busca global.", cliente.Nome)
-		return
-	}
-
-	log.Printf("[MATCHMAKING-TX] Iniciando busca global para %s", cliente.Nome)
-
-	// Busca oponente em outros servidores
+// tentarMatchmakingGlobalAgora faz UMA tentativa de encontrar um oponente global.
+func (s *Servidor) tentarMatchmakingGlobalAgora(cliente *Cliente) bool {
+	// Busca oponente em outros servidores ATIVOS
 	s.mutexServidores.RLock()
 	servidoresAtivos := make([]string, 0, len(s.Servidores))
 	for addr, info := range s.Servidores {
@@ -1477,18 +2037,33 @@ func (s *Servidor) tentarMatchmakingGlobal(cliente *Cliente) {
 	}
 	s.mutexServidores.RUnlock()
 
+	if len(servidoresAtivos) == 0 {
+		// log.Printf("[MATCHMAKING-AGORA] Nenhum outro servidor ativo para buscar oponente para %s.", cliente.Nome)
+		return false // Não há ninguém para perguntar
+	}
+
+	// Embaralha a ordem para não sobrecarregar sempre o mesmo servidor
+	rand.Shuffle(len(servidoresAtivos), func(i, j int) {
+		servidoresAtivos[i], servidoresAtivos[j] = servidoresAtivos[j], servidoresAtivos[i]
+	})
+
 	for _, addr := range servidoresAtivos {
+		// A função realizarSolicitacaoMatchmaking já contém a lógica de:
+		// 1. Enviar POST /matchmaking/solicitar_oponente
+		// 2. Se encontrar (resposta diz partida_encontrada: true):
+		//    - Cria a sala local como Sombra.
+		//    - Associa o cliente à sala.
+		//    - Envia POST /matchmaking/confirmar_partida para o Host.
+		//    - Publica PARTIDA_ENCONTRADA para o cliente local.
+		//    - Retorna true.
+		// 3. Se não encontrar, retorna false.
 		if s.realizarSolicitacaoMatchmaking(addr, cliente) {
-			// Encontrou partida, a função interna já tratou de tudo.
-			return
+			return true // Encontrou partida! A função interna já tratou de tudo.
 		}
 	}
 
-	// Se chegou aqui, não encontrou oponente. Coloca o cliente de volta na fila.
-	log.Printf("[MATCHMAKING-TX] Nenhum oponente encontrado globalmente para %s. Devolvendo à fila.", cliente.Nome)
-	s.mutexFila.Lock()
-	s.FilaDeEspera = append(s.FilaDeEspera, cliente)
-	s.mutexFila.Unlock()
+	// Se chegou aqui, não encontrou oponente em NENHUM servidor nesta tentativa.
+	return false
 }
 
 // realizarSolicitacaoMatchmaking envia uma requisição de oponente para um servidor específico.
@@ -1501,7 +2076,16 @@ func (s *Servidor) realizarSolicitacaoMatchmaking(addr string, cliente *Cliente)
 	})
 
 	httpClient := &http.Client{Timeout: 3 * time.Second}
-	resp, err := httpClient.Post(fmt.Sprintf("http://%s/matchmaking/solicitar_oponente", addr), "application/json", bytes.NewBuffer(reqBody))
+	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s/matchmaking/solicitar_oponente", addr), bytes.NewBuffer(reqBody))
+	if err != nil {
+		log.Printf("[MATCHMAKING-TX] Erro ao criar requisição para %s: %v", addr, err)
+		return false
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+generateJWT(s.ServerID))
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		log.Printf("[MATCHMAKING-TX] Erro ao contatar servidor %s: %v", addr, err)
 		return false
@@ -1523,9 +2107,21 @@ func (s *Servidor) realizarSolicitacaoMatchmaking(addr string, cliente *Cliente)
 	if res.PartidaEncontrada {
 		log.Printf("[MATCHMAKING-TX] Partida encontrada no servidor %s! Sala: %s, Oponente: %s", addr, res.SalaID, res.OponenteNome)
 
+		// A requisição foi bem-sucedida, então removemos nosso cliente da fila local.
+		s.mutexFila.Lock()
+		for i, c := range s.FilaDeEspera {
+			if c.ID == cliente.ID {
+				s.FilaDeEspera = append(s.FilaDeEspera[:i], s.FilaDeEspera[i+1:]...)
+				break
+			}
+		}
+		s.mutexFila.Unlock()
+
 		// Cria a sala como Sombra neste servidor.
-		novaSala := &Sala{
-			ID:             res.SalaID,
+		salaID := res.SalaID
+		s.mutexSalas.Lock()
+		s.Salas[salaID] = &Sala{
+			ID:             salaID,
 			Jogadores:      []*Cliente{cliente},
 			Estado:         "AGUARDANDO_COMPRA",
 			CartasNaMesa:   make(map[string]Carta),
@@ -1536,13 +2132,10 @@ func (s *Servidor) realizarSolicitacaoMatchmaking(addr string, cliente *Cliente)
 			ServidorHost:   res.ServidorHost,
 			ServidorSombra: s.MeuEndereco,
 		}
-
-		s.mutexSalas.Lock()
-		s.Salas[res.SalaID] = novaSala
 		s.mutexSalas.Unlock()
 
 		cliente.mutex.Lock()
-		cliente.Sala = novaSala
+		cliente.Sala = s.Salas[salaID]
 		cliente.mutex.Unlock()
 
 		// Notifica o servidor Host para confirmar a participação do nosso jogador.
@@ -1556,8 +2149,11 @@ func (s *Servidor) realizarSolicitacaoMatchmaking(addr string, cliente *Cliente)
 		// Notifica nosso cliente local.
 		s.publicarParaCliente(cliente.ID, protocolo.Mensagem{
 			Comando: "PARTIDA_ENCONTRADA",
-			Dados:   mustJSON(protocolo.DadosPartidaEncontrada{SalaID: res.SalaID, OponenteID: "oponente_remoto", OponenteNome: res.OponenteNome}), // O ID exato do oponente não é conhecido aqui, mas o cliente precisa de um valor.
-		})
+			Dados: mustJSON(protocolo.DadosPartidaEncontrada{
+				SalaID:       res.SalaID,
+				OponenteID:   "remoto_" + res.OponenteNome, // Um ID placeholder, mas que ajuda a identificar
+				OponenteNome: res.OponenteNome,             // Nome correto recebido do Host
+			})})
 		return true
 	}
 
@@ -1568,41 +2164,73 @@ func (s *Servidor) realizarSolicitacaoMatchmaking(addr string, cliente *Cliente)
 func (s *Servidor) criarSala(j1, j2 *Cliente) {
 	salaID := uuid.New().String()
 
+	// --- CORREÇÃO: Buscar nomes de forma segura ---
+	s.mutexClientes.RLock()
+	cliente1Completo, ok1 := s.Clientes[j1.ID]
+	cliente2Completo, ok2 := s.Clientes[j2.ID]
+	s.mutexClientes.RUnlock()
+
+	if !ok1 || !ok2 {
+		log.Printf("[CRIAR_SALA_ERRO:%s] Falha ao buscar informações completas dos clientes %s ou %s no mapa principal.", s.ServerID, j1.ID, j2.ID)
+		return // Aborta a criação da sala
+	}
+
+	// Usa os nomes dos clientes buscados do mapa principal
+	// Leitura segura dos nomes dentro do lock do cliente específico
+	cliente1Completo.mutex.Lock()
+	nomeJ1 := cliente1Completo.Nome
+	cliente1Completo.mutex.Unlock()
+	cliente2Completo.mutex.Lock()
+	nomeJ2 := cliente2Completo.Nome
+	cliente2Completo.mutex.Unlock()
+
+	idJ1 := cliente1Completo.ID
+	idJ2 := cliente2Completo.ID
+
+	log.Printf("[CRIAR_SALA:%s] Tentando criar sala %s para %s (%s) vs %s (%s)", s.ServerID, salaID, nomeJ1, idJ1, nomeJ2, idJ2)
+	if nomeJ1 == "" || nomeJ2 == "" {
+		log.Printf("[CRIAR_SALA_ERRO:%s] Nomes vazios detectados mesmo após busca! Cliente1: '%s', Cliente2: '%s'. Abortando.", s.ServerID, nomeJ1, nomeJ2)
+		return // Aborta se os nomes ainda estiverem vazios
+	}
+	// --- FIM DA CORREÇÃO ---
+
+	// O resto da função continua...
 	novaSala := &Sala{
 		ID:             salaID,
-		Jogadores:      []*Cliente{j1, j2},
+		Jogadores:      []*Cliente{cliente1Completo, cliente2Completo}, // Usa os ponteiros completos
 		Estado:         "AGUARDANDO_COMPRA",
 		CartasNaMesa:   make(map[string]Carta),
 		PontosRodada:   make(map[string]int),
 		PontosPartida:  make(map[string]int),
 		NumeroRodada:   1,
 		Prontos:        make(map[string]bool),
-		ServidorHost:   s.MeuEndereco, // Este servidor é o host
-		ServidorSombra: "",            // TODO: determinar sombra se jogadores de servidores diferentes
+		ServidorHost:   s.MeuEndereco,
+		ServidorSombra: "",
 	}
-
+	// Adiciona a sala ao mapa
 	s.mutexSalas.Lock()
 	s.Salas[salaID] = novaSala
 	s.mutexSalas.Unlock()
 
-	j1.mutex.Lock()
-	j1.Sala = novaSala
-	j1.mutex.Unlock()
+	// Associa os clientes à sala
+	cliente1Completo.mutex.Lock()
+	cliente1Completo.Sala = novaSala
+	cliente1Completo.mutex.Unlock()
 
-	j2.mutex.Lock()
-	j2.Sala = novaSala
-	j2.mutex.Unlock()
+	cliente2Completo.mutex.Lock()
+	cliente2Completo.Sala = novaSala
+	cliente2Completo.mutex.Unlock()
 
-	log.Printf("Sala %s criada: %s vs %s", salaID, j1.Nome, j2.Nome)
+	log.Printf("Sala %s criada localmente: %s vs %s", salaID, nomeJ1, nomeJ2)
 
-	// Notifica jogadores
+	// Notifica jogadores - GARANTE QUE USA OS NOMES CORRETOS
 	msg1 := protocolo.Mensagem{
 		Comando: "PARTIDA_ENCONTRADA",
-		Dados:   mustJSON(protocolo.DadosPartidaEncontrada{SalaID: salaID, OponenteID: j2.ID, OponenteNome: j2.Nome}),
+		Dados:   mustJSON(protocolo.DadosPartidaEncontrada{SalaID: salaID, OponenteID: idJ2, OponenteNome: nomeJ2}),
 	}
 	msg2 := protocolo.Mensagem{
 		Comando: "PARTIDA_ENCONTRADA",
-		Dados:   mustJSON(protocolo.DadosPartidaEncontrada{SalaID: salaID, OponenteID: j1.ID, OponenteNome: j1.Nome}),
+		Dados:   mustJSON(protocolo.DadosPartidaEncontrada{SalaID: salaID, OponenteID: idJ1, OponenteNome: nomeJ1}),
 	}
 
 	s.publicarParaCliente(j1.ID, msg1)
@@ -1693,26 +2321,47 @@ func (s *Servidor) iniciarPartida(sala *Sala) {
 func (s *Servidor) encaminharJogadaParaHost(sala *Sala, clienteID, cartaID string) {
 	sala.mutex.Lock()
 	host := sala.ServidorHost
+	eventSeq := sala.EventSeq + 1 // Próximo eventSeq
 	sala.mutex.Unlock()
 
-	log.Printf("Encaminhando jogada de %s para o Host %s", clienteID, host)
+	log.Printf("[SHADOW] Encaminhando jogada de %s para o Host %s (eventSeq: %d)", clienteID, host, eventSeq)
 
-	dados := map[string]interface{}{
-		"sala_id":    sala.ID,
-		"comando":    "JOGAR_CARTA",
-		"cliente_id": clienteID,
-		"carta_id":   cartaID,
+	// Usa o novo endpoint /game/event
+	req := GameEventRequest{
+		MatchID:   sala.ID,
+		EventSeq:  eventSeq,
+		EventType: "CARD_PLAYED",
+		PlayerID:  clienteID,
+		Data: map[string]interface{}{
+			"carta_id": cartaID,
+		},
+		Token: generateJWT(s.ServerID),
 	}
 
-	jsonData, _ := json.Marshal(dados)
-	url := fmt.Sprintf("http://%s/partida/encaminhar_comando", host)
+	// Gera assinatura
+	event := GameEvent{
+		EventSeq:  req.EventSeq,
+		MatchID:   req.MatchID,
+		EventType: req.EventType,
+		PlayerID:  req.PlayerID,
+	}
+	signEvent(&event)
+	req.Signature = event.Signature
+
+	jsonData, _ := json.Marshal(req)
+	url := fmt.Sprintf("http://%s/game/event", host)
 
 	// Adiciona timeout para detectar falha do Host
-	client := &http.Client{
+	httpClient := &http.Client{
 		Timeout: 5 * time.Second,
 	}
 
-	resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonData))
+	// Adiciona header de autenticação
+	httpReq, _ := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+req.Token)
+
+	resp, err := httpClient.Do(httpReq)
 	if err != nil {
 		log.Printf("[FAILOVER] Host %s inacessível: %v. Iniciando promoção da Sombra...", host, err)
 		s.promoverSombraAHost(sala)
@@ -1722,11 +2371,11 @@ func (s *Servidor) encaminharJogadaParaHost(sala *Sala, clienteID, cartaID strin
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("Host retornou status %d ao processar jogada", resp.StatusCode)
+		log.Printf("[SHADOW] Host retornou status %d ao processar jogada", resp.StatusCode)
 		return
 	}
 
-	log.Printf("Jogada processada pelo Host com sucesso")
+	log.Printf("[SHADOW] Jogada processada pelo Host com sucesso")
 }
 
 // promoverSombraAHost promove a Sombra a Host quando o Host original falha
@@ -1759,6 +2408,10 @@ func (s *Servidor) processarJogadaComoHost(sala *Sala, clienteID, cartaID string
 	sala.mutex.Lock()
 	defer sala.mutex.Unlock()
 
+	// Incrementa eventSeq
+	sala.EventSeq++
+	currentEventSeq := sala.EventSeq
+
 	// Encontra o cliente
 	var jogador *Cliente
 	var nomeJogador string
@@ -1771,13 +2424,13 @@ func (s *Servidor) processarJogadaComoHost(sala *Sala, clienteID, cartaID string
 	}
 
 	if jogador == nil {
-		log.Printf("Cliente %s não encontrado na sala", clienteID)
+		log.Printf("[HOST] Cliente %s não encontrado na sala", clienteID)
 		return nil
 	}
 
 	// Verifica se já jogou nesta rodada
 	if _, jaJogou := sala.CartasNaMesa[nomeJogador]; jaJogou {
-		log.Printf("Jogador %s já jogou nesta rodada", nomeJogador)
+		log.Printf("[HOST] Jogador %s já jogou nesta rodada", nomeJogador)
 		return nil
 	}
 
@@ -1795,7 +2448,7 @@ func (s *Servidor) processarJogadaComoHost(sala *Sala, clienteID, cartaID string
 
 	if cartaIndex == -1 {
 		jogador.mutex.Unlock()
-		log.Printf("Carta %s não encontrada no inventário de %s", cartaID, nomeJogador)
+		log.Printf("[HOST] Carta %s não encontrada no inventário de %s", cartaID, nomeJogador)
 		return nil
 	}
 
@@ -1806,7 +2459,23 @@ func (s *Servidor) processarJogadaComoHost(sala *Sala, clienteID, cartaID string
 	// Adiciona carta à mesa
 	sala.CartasNaMesa[nomeJogador] = carta
 
-	log.Printf("Jogador %s jogou carta %s (Poder: %d)", nomeJogador, carta.Nome, carta.Valor)
+	// Registra evento no log
+	event := GameEvent{
+		EventSeq:  currentEventSeq,
+		MatchID:   sala.ID,
+		Timestamp: time.Now(),
+		EventType: "CARD_PLAYED",
+		PlayerID:  clienteID,
+		Data: map[string]interface{}{
+			"carta_id":    cartaID,
+			"carta_nome":  carta.Nome,
+			"carta_valor": carta.Valor,
+		},
+	}
+	signEvent(&event)
+	sala.EventLog = append(sala.EventLog, event)
+
+	log.Printf("[HOST] Jogador %s jogou carta %s (Poder: %d) - eventSeq: %d", nomeJogador, carta.Nome, carta.Valor, currentEventSeq)
 
 	// Verifica se ambos jogaram
 	if len(sala.CartasNaMesa) == len(sala.Jogadores) {
@@ -1826,14 +2495,102 @@ func (s *Servidor) processarJogadaComoHost(sala *Sala, clienteID, cartaID string
 		PontosPartida: sala.PontosPartida,
 		NumeroRodada:  sala.NumeroRodada,
 		Prontos:       sala.Prontos,
+		EventSeq:      sala.EventSeq,
+		EventLog:      sala.EventLog,
 	}
 
-	// Sincroniza com a Sombra
+	// Sincroniza com a Sombra usando o novo endpoint
 	if sala.ServidorSombra != "" && sala.ServidorSombra != s.MeuEndereco {
-		go s.sincronizarEstadoComSombra(sala.ServidorSombra, estado)
+		go s.replicarEstadoParaShadow(sala.ServidorSombra, estado)
 	}
 
+	// --- ADICIONE O CÓDIGO ABAIXO ---
+	// Após processar a jogada, pega a última mensagem enviada aos clientes locais
+	// e a retransmite para o servidor Sombra, se houver.
+
+	// (Esta parte assume que as funções notificar... publicam a mensagem correta.
+	// Precisamos capturar essa mensagem ou reconstruí-la aqui)
+
+	// Reconstrói a mensagem de atualização para enviar à Sombra
+	contagemCartas := make(map[string]int)
+	ultimaJogada := make(map[string]Carta) // Precisamos das cartas jogadas nesta rodada
+	vencedorDaJogada := ""                 // Precisamos do resultado da última jogada
+
+	// Rebusca informações atualizadas (simplificado, idealmente viria do resolverJogada)
+	for _, j := range sala.Jogadores {
+		j.mutex.Lock()
+		contagemCartas[j.Nome] = len(j.Inventario)
+		j.mutex.Unlock()
+		if c, ok := sala.CartasNaMesa[j.Nome]; ok { // Pega cartas da mesa se ainda não foram limpas
+			ultimaJogada[j.Nome] = c
+		}
+	}
+	// Lógica para determinar vencedorDaJogada se aplicável (precisa ser extraída de resolverJogada)
+
+	msgUpdate := protocolo.Mensagem{
+		Comando: "ATUALIZACAO_JOGO",
+		Dados: mustJSON(protocolo.DadosAtualizacaoJogo{
+			MensagemDoTurno: fmt.Sprintf("Jogada de %s processada.", nomeJogador), // Mensagem genérica
+			NumeroRodada:    sala.NumeroRodada,
+			ContagemCartas:  contagemCartas,
+			UltimaJogada:    ultimaJogada,
+			VencedorJogada:  vencedorDaJogada, // Pode estar vazio se só um jogou
+			PontosRodada:    sala.PontosRodada,
+			PontosPartida:   sala.PontosPartida,
+		}),
+	}
+
+	// Envia para a Sombra retransmitir
+	if sala.ServidorSombra != "" && sala.ServidorSombra != s.MeuEndereco {
+		var jogadorRemotoID string
+		// Encontra o ID do jogador que NÃO é o que acabou de jogar (o destinatário remoto)
+		for _, jogador := range sala.Jogadores {
+			if jogador.ID != clienteID { // Encontra o ID do outro jogador na sala
+				jogadorRemotoID = jogador.ID
+				break
+			}
+		}
+		if jogadorRemotoID != "" {
+			go s.notificarJogadorRemoto(sala.ServidorSombra, jogadorRemotoID, msgUpdate)
+		}
+	}
 	return estado
+}
+
+// replicarEstadoParaShadow replica o estado para o servidor Shadow usando o endpoint /game/replicate
+func (s *Servidor) replicarEstadoParaShadow(shadowAddr string, estado *EstadoPartida) {
+	req := GameReplicateRequest{
+		MatchID:  estado.SalaID,
+		EventSeq: estado.EventSeq,
+		State:    *estado,
+		Token:    generateJWT(s.ServerID),
+	}
+
+	// Gera assinatura
+	data := fmt.Sprintf("%s:%d", req.MatchID, req.EventSeq)
+	req.Signature = generateHMAC(data, JWT_SECRET)
+
+	jsonData, _ := json.Marshal(req)
+	url := fmt.Sprintf("http://%s/game/replicate", shadowAddr)
+
+	httpClient := &http.Client{Timeout: 3 * time.Second}
+
+	httpReq, _ := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+req.Token)
+
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		log.Printf("[HOST] Erro ao replicar estado para Shadow %s: %v", shadowAddr, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		log.Printf("[HOST] Estado replicado com sucesso para Shadow %s (eventSeq: %d)", shadowAddr, estado.EventSeq)
+	} else {
+		log.Printf("[HOST] Shadow %s retornou status %d ao receber replicação", shadowAddr, resp.StatusCode)
+	}
 }
 
 // resolverJogada resolve uma jogada quando ambos os jogadores jogaram

@@ -33,8 +33,10 @@ func main() {
 	fmt.Print("Digite seu nome: ")
 	scanner.Scan()
 	meuNome = strings.TrimSpace(scanner.Text())
+	fmt.Printf("[DEBUG] Nome lido: '%s' (len=%d)\n", meuNome, len(meuNome))
 	if meuNome == "" {
 		meuNome = "Jogador"
+		fmt.Printf("[DEBUG] Nome vazio, usando padrão: '%s'\n", meuNome)
 	}
 
 	// --- LÓGICA DE ESCOLHA CORRIGIDA ---
