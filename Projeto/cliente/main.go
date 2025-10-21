@@ -264,6 +264,18 @@ func processarMensagemServidor(msg protocolo.Mensagem) {
 		json.Unmarshal(msg.Dados, &dados)
 		fmt.Printf("\n[ERRO] %s\n> ", dados.Mensagem)
 
+	case "CHAT_RECEBIDO":
+		var dados protocolo.DadosReceberChat
+		if err := json.Unmarshal(msg.Dados, &dados); err == nil {
+			prefixo := dados.NomeJogador
+			if dados.NomeJogador == meuNome {
+				prefixo = "[VOCÊ]"
+			}
+			fmt.Printf("\r💬 %s: %s\n> ", prefixo, dados.Texto)
+		} else {
+			log.Printf("Erro ao decodificar dados do chat: %v", err)
+		}
+
 	default:
 		fmt.Printf("\n[DEBUG] Comando não reconhecido: %s\n> ", msg.Comando)
 	}
@@ -338,6 +350,11 @@ func handleEventoPartida(client mqtt.Client, msg mqtt.Message) {
 		}
 		fmt.Printf("╚═══════════════════════════════════════╝\n")
 		fmt.Print("> ")
+
+	case "ERRO_JOGADA":
+		var dados protocolo.DadosErro
+		json.Unmarshal(mensagem.Dados, &dados)
+		fmt.Printf("\n[JOGADA_INVALIDA] %s\n> ", dados.Mensagem)
 
 	// --- ADICIONE ESTE CASE ---
 	case "CHAT_RECEBIDO": // Ou "RECEBER_CHAT" se o servidor estiver a enviar isso

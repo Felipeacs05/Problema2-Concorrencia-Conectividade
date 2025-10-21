@@ -164,10 +164,12 @@ func (m *Manager) processoEleicao() {
 		m.mutex.RLock()
 		ultimoPingLider := m.UltimoHeartbeat
 		liderExiste := m.LiderAtual != ""
+		souLider := m.souLider
 		m.mutex.RUnlock()
 
-		// Se não há líder ou o último heartbeat do líder foi há muito tempo, inicia a eleição
-		if !liderExiste || time.Since(ultimoPingLider) > ELEICAO_TIMEOUT {
+		// Se não sou o líder, verifico se o líder atual está ativo.
+		// Se não há líder ou o último heartbeat do líder foi há muito tempo, inicia a eleição.
+		if !souLider && (!liderExiste || time.Since(ultimoPingLider) > ELEICAO_TIMEOUT) {
 			log.Printf("Líder inativo ou inexistente. Iniciando nova eleição.")
 			m.iniciarEleicao()
 		}

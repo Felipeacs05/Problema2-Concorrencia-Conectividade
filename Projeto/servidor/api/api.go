@@ -17,6 +17,9 @@ type ServidorInterface interface {
 	GetStatusEstoque() (map[string]int, int)
 	GetFilaDeEspera() []*tipos.Cliente
 	GetMeuEndereco() string
+	AtualizarEstadoSalaRemoto(estado tipos.EstadoPartida)
+	CriarSalaRemota(solicitante, oponente *tipos.Cliente)
+	RemoverPrimeiroDaFila() *tipos.Cliente
 }
 
 type Server struct {
@@ -90,6 +93,7 @@ func (s *Server) setupRoutes() {
 		partida.POST("/encaminhar_comando", s.handleEncaminharComando)
 		partida.POST("/sincronizar_estado", s.handleSincronizarEstado)
 		partida.POST("/notificar_jogador", s.handleNotificarJogador)
+		partida.POST("/iniciar_remoto", s.handleIniciarRemoto)
 		partida.POST("/atualizar_estado", s.handleAtualizarEstado)
 		partida.POST("/notificar_pronto", s.handleNotificarPronto)
 	}

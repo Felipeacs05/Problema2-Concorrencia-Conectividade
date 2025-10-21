@@ -169,6 +169,39 @@ func (s *Servidor) NotificarCompraSucesso(clienteID string, cartas []tipos.Carta
 	s.publicarParaCliente(clienteID, msg)
 }
 
+func (s *Servidor) AtualizarEstadoSalaRemoto(estado tipos.EstadoPartida) {
+	s.mutexSalas.Lock()
+	sala, ok := s.Salas[estado.SalaID]
+	s.mutexSalas.Unlock()
+
+	if !ok {
+		log.Printf("[SYNC_SOMBRA_ERRO] Sala %s não encontrada para atualização remota", estado.SalaID)
+		return
+	}
+
+	sala.Mutex.Lock()
+	sala.Estado = estado.Estado
+	sala.TurnoDe = estado.TurnoDe
+	sala.Mutex.Unlock()
+
+	log.Printf("[SYNC_SOMBRA_OK] Sala %s atualizada. Novo estado: %s, Turno de: %s", sala.ID, sala.Estado, sala.TurnoDe)
+}
+
+func (s *Servidor) CriarSalaRemota(solicitante, oponente *tipos.Cliente) {
+	s.criarSala(solicitante, oponente)
+}
+
+func (s *Servidor) RemoverPrimeiroDaFila() *tipos.Cliente {
+	s.mutexFila.Lock()
+	defer s.mutexFila.Unlock()
+	if len(s.FilaDeEspera) == 0 {
+		return nil
+	}
+	oponente := s.FilaDeEspera[0]
+	s.FilaDeEspera = s.FilaDeEspera[1:]
+	return oponente
+}
+
 func (s *Servidor) GetStatusEstoque() (map[string]int, int) {
 	return s.Store.GetStatusEstoque()
 }
@@ -618,6 +651,7 @@ func (s *Servidor) realizarSolicitacaoMatchmaking(addr string, cliente *tipos.Cl
 		PartidaEncontrada bool   `json:"partida_encontrada"`
 		SalaID            string `json:"sala_id"`
 		OponenteNome      string `json:"oponente_nome"`
+		OponenteID        string `json:"oponente_id"`
 		ServidorHost      string `json:"servidor_host"`
 	}
 
@@ -627,56 +661,18 @@ func (s *Servidor) realizarSolicitacaoMatchmaking(addr string, cliente *tipos.Cl
 	}
 
 	if res.PartidaEncontrada {
-		log.Printf("[MATCHMAKING-TX] Partida encontrada no servidor %s! Sala: %s, Oponente: %s", addr, res.SalaID, res.OponenteNome)
+		log.Printf("[MATCHMAKING-TX] Partida encontrada no servidor %s! Oponente: %s", addr, res.OponenteNome)
 
-		// A requisição foi bem-sucedida, então removemos nosso cliente da fila local.
-		s.mutexFila.Lock()
-		for i, c := range s.FilaDeEspera {
-			if c.ID == cliente.ID {
-				s.FilaDeEspera = append(s.FilaDeEspera[:i], s.FilaDeEspera[i+1:]...)
-				break
-			}
+		// Cria um objeto Cliente para o oponente remoto
+		oponenteRemoto := &tipos.Cliente{
+			ID:   res.OponenteID,
+			Nome: res.OponenteNome,
 		}
-		s.mutexFila.Unlock()
 
-		// Cria a sala como Sombra neste servidor.
-		salaID := res.SalaID
-		s.mutexSalas.Lock()
-		s.Salas[salaID] = &tipos.Sala{
-			ID:             salaID,
-			Jogadores:      []*tipos.Cliente{cliente},
-			Estado:         "AGUARDANDO_COMPRA",
-			CartasNaMesa:   make(map[string]Carta),
-			PontosRodada:   make(map[string]int),
-			PontosPartida:  make(map[string]int),
-			NumeroRodada:   1,
-			Prontos:        make(map[string]bool),
-			ServidorHost:   res.ServidorHost,
-			ServidorSombra: s.MeuEndereco,
-		}
-		s.mutexSalas.Unlock()
+		// Cria a sala. O servidor remoto será o Host.
+		s.criarSala(cliente, oponenteRemoto) // `cliente` é o jogador local
 
-		cliente.Mutex.Lock()
-		cliente.Sala = s.Salas[salaID]
-		cliente.Mutex.Unlock()
-
-		// Notifica o servidor Host para confirmar a participação do nosso jogador.
-		confirmBody, _ := json.Marshal(map[string]string{
-			"sala_id":          res.SalaID,
-			"solicitante_id":   cliente.ID,
-			"solicitante_nome": cliente.Nome,
-		})
-		http.Post(fmt.Sprintf("http://%s/matchmaking/confirmar_partida", res.ServidorHost), "application/json", bytes.NewBuffer(confirmBody))
-
-		// Notifica nosso cliente local.
-		s.publicarParaCliente(cliente.ID, protocolo.Mensagem{
-			Comando: "PARTIDA_ENCONTRADA",
-			Dados: seguranca.MustJSON(protocolo.DadosPartidaEncontrada{
-				SalaID:       res.SalaID,
-				OponenteID:   "remoto_" + res.OponenteNome, // Um ID placeholder, mas que ajuda a identificar
-				OponenteNome: res.OponenteNome,             // Nome correto recebido do Host
-			})})
-		return true
+		return true // Sucesso!
 	}
 
 	log.Printf("[MATCHMAKING-TX] Servidor %s não encontrou oponente.", addr)
@@ -883,24 +879,21 @@ func (s *Servidor) verificarEIniciarPartidaSeProntos(sala *tipos.Sala) {
 
 		// Se houver uma sombra, notifica via API que a partida iniciou
 		if sombraAddr != "" {
-			// Cria uma mensagem simples para notificar a Sombra
-			msgInicioRemoto := protocolo.Mensagem{
-				Comando: "PARTIDA_INICIADA_REMOTA", // Um comando específico para a Sombra
-				Dados:   seguranca.MustJSON(map[string]string{"sala_id": salaID}),
-			}
-			// Encontra o ID do jogador remoto para a notificação
-			var jogadorRemotoID string
+			// Recupera o estado atualizado da sala (principalmente o TurnoDe)
 			sala.Mutex.Lock()
-			for _, jogador := range sala.Jogadores {
-				if s.getClienteLocal(jogador.ID) == nil {
-					jogadorRemotoID = jogador.ID
-					break
-				}
-			}
+			estadoAtualizado := s.criarEstadoDaSala(sala)
 			sala.Mutex.Unlock()
-			if jogadorRemotoID != "" {
-				go s.notificarJogadorRemoto(sombraAddr, jogadorRemotoID, msgInicioRemoto)
-			}
+
+			// Envia o estado completo para a sombra
+			go func() {
+				log.Printf("[SYNC_SOMBRA] Notificando sombra %s sobre início da partida %s. Turno de: %s", sombraAddr, salaID, estadoAtualizado.TurnoDe)
+				reqBody, _ := json.Marshal(estadoAtualizado)
+				httpClient := &http.Client{Timeout: 10 * time.Second}
+				_, err := httpClient.Post(fmt.Sprintf("http://%s/partida/iniciar_remoto", sombraAddr), "application/json", bytes.NewBuffer(reqBody))
+				if err != nil {
+					log.Printf("[SYNC_SOMBRA_ERRO] Falha ao notificar sombra %s: %v", sombraAddr, err)
+				}
+			}()
 		}
 	}
 }
@@ -1548,8 +1541,9 @@ func (s *Servidor) criarEstadoDaSala(sala *tipos.Sala) *tipos.EstadoPartida {
 
 	// Simplificado para apenas o necessário
 	return &tipos.EstadoPartida{
-		SalaID: sala.ID,
-		Estado: sala.Estado,
+		SalaID:  sala.ID,
+		Estado:  sala.Estado,
+		TurnoDe: sala.TurnoDe,
 	}
 }
 

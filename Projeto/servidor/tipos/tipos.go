@@ -64,6 +64,7 @@ type EstadoPartida struct {
 	Prontos       map[string]bool  `json:"prontos"`
 	EventSeq      int64            `json:"eventSeq"` // Sequência de eventos
 	EventLog      []GameEvent      `json:"eventLog"` // Log de eventos
+	TurnoDe       string           `json:"turnoDe"`  // ID do jogador que deve jogar
 }
 
 // GameStartRequest representa a requisição para iniciar uma partida

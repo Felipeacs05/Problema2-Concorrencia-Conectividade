@@ -174,6 +174,19 @@ func (s *Server) handleNotificarJogador(c *gin.Context) {
 	// ... (código a ser movido)
 }
 
+func (s *Server) handleIniciarRemoto(c *gin.Context) {
+	var estado tipos.EstadoPartida
+	if err := c.ShouldBindJSON(&estado); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Estado da partida inválido"})
+		return
+	}
+
+	log.Printf("[SYNC_SOMBRA_RX] Recebido estado inicial da partida %s. Turno de: %s", estado.SalaID, estado.TurnoDe)
+	s.servidor.AtualizarEstadoSalaRemoto(estado)
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
 func (s *Server) handleAtualizarEstado(c *gin.Context) {
 	// ... (código a ser movido)
 }
@@ -195,28 +208,34 @@ func (s *Server) handleSolicitarOponente(c *gin.Context) {
 		return
 	}
 
-	// Verifica se há jogadores na fila local
-	fila := s.servidor.GetFilaDeEspera()
-	if len(fila) > 0 {
-		// Encontrou oponente local
-		oponente := fila[0]
+	// Tenta encontrar um oponente na fila local
+	oponente := s.servidor.RemoverPrimeiroDaFila()
 
-		// Remove da fila (isso seria feito pelo servidor principal)
-		// Por enquanto, apenas retorna a resposta
+	if oponente != nil {
+		// Oponente encontrado!
+		log.Printf("[MATCHMAKING_RX] Oponente '%s' encontrado localmente para solicitante '%s' de %s", oponente.Nome, req.SolicitanteNome, req.ServidorOrigem)
 
+		// Cria um objeto Cliente para o solicitante remoto
+		solicitante := &tipos.Cliente{
+			ID:   req.SolicitanteID,
+			Nome: req.SolicitanteNome,
+		}
+
+		// Cria a sala. Servidor local será o Host.
+		s.servidor.CriarSalaRemota(oponente, solicitante)
+
+		// Responde ao servidor de origem com sucesso
 		c.JSON(http.StatusOK, gin.H{
 			"partida_encontrada": true,
-			"sala_id":            "sala_local_" + req.SolicitanteID,
-			"oponente_nome":      oponente.Nome,
-			"servidor_host":      s.servidor.GetMeuEndereco(),
+			"oponente_nome":      oponente.Nome, // Retorna o nome do jogador local para o solicitante
+			"oponente_id":        oponente.ID,
 		})
 		return
 	}
 
 	// Não encontrou oponente
-	c.JSON(http.StatusOK, gin.H{
-		"partida_encontrada": false,
-	})
+	log.Printf("[MATCHMAKING_RX] Nenhum oponente na fila para '%s'", req.SolicitanteNome)
+	c.JSON(http.StatusOK, gin.H{"partida_encontrada": false})
 }
 
 func (s *Server) handleConfirmarPartida(c *gin.Context) {
