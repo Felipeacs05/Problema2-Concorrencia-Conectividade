@@ -929,9 +929,15 @@ func (s *Servidor) iniciarPartida(sala *tipos.Sala) {
 	log.Printf("[JOGO_DEBUG] Partida %s iniciada. Jogador inicial: %s (%s)", sala.ID, jogadorInicial.Nome, jogadorInicial.ID)
 	log.Printf("[JOGO_DEBUG] TurnoDe definido como: %s", sala.TurnoDe)
 
+	// Envia um estado inicial completo em vez de apenas uma mensagem de texto
 	msg := protocolo.Mensagem{
-		Comando: "PARTIDA_INICIADA",
-		Dados:   seguranca.MustJSON(map[string]string{"mensagem": "Partida iniciada! É a vez de " + jogadorInicial.Nome}),
+		Comando: "ATUALIZACAO_JOGO",
+		Dados: seguranca.MustJSON(protocolo.DadosAtualizacaoJogo{
+			MensagemDoTurno: fmt.Sprintf("Partida iniciada! É a vez de %s.", jogadorInicial.Nome),
+			NumeroRodada:    sala.NumeroRodada,
+			ContagemCartas:  map[string]int{sala.Jogadores[0].Nome: len(sala.Jogadores[0].Inventario), sala.Jogadores[1].Nome: len(sala.Jogadores[1].Inventario)},
+			TurnoDe:         sala.TurnoDe,
+		}),
 	}
 	s.publicarEventoPartida(sala.ID, msg)
 }

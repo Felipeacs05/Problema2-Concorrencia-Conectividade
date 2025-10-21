@@ -24,6 +24,7 @@ var (
 	oponenteID    string
 	oponenteNome  string
 	meuInventario []protocolo.Carta
+	turnoDeQuem   string // NOVO: Armazena o ID de quem tem o turno
 )
 
 func main() {
@@ -295,20 +296,14 @@ func handleEventoPartida(client mqtt.Client, msg mqtt.Message) {
 	// --- FIM DA ADIÇÃO ---
 
 	switch mensagem.Comando {
-	case "PARTIDA_INICIADA":
-		var dados map[string]string
-		json.Unmarshal(mensagem.Dados, &dados)
-		fmt.Printf("\n╔═══════════════════════════════════════╗\n")
-		fmt.Printf("║   PARTIDA INICIADA!                   ║\n")
-		fmt.Printf("╚═══════════════════════════════════════╝\n")
-		fmt.Printf("\n%s\n", dados["mensagem"])
-		fmt.Println("Use /jogar <ID_da_carta> para jogar uma carta")
-		fmt.Println("Use /cartas para ver suas cartas")
-		fmt.Print("> ")
-
 	case "ATUALIZACAO_JOGO":
 		var dados protocolo.DadosAtualizacaoJogo
 		json.Unmarshal(mensagem.Dados, &dados)
+
+		// ATUALIZA O ESTADO DO TURNO
+		if dados.TurnoDe != "" {
+			turnoDeQuem = dados.TurnoDe
+		}
 
 		fmt.Printf("\n--- RODADA %d ---\n", dados.NumeroRodada)
 		fmt.Println(dados.MensagemDoTurno)
@@ -333,6 +328,13 @@ func handleEventoPartida(client mqtt.Client, msg mqtt.Message) {
 			for nome, qtd := range dados.ContagemCartas {
 				fmt.Printf("  %s: %d cartas\n", nome, qtd)
 			}
+		}
+
+		// Mostra de quem é a vez
+		if turnoDeQuem == meuID {
+			fmt.Println("\n>>> É A SUA VEZ DE JOGAR! <<<")
+		} else {
+			fmt.Printf("\n(Aguardando jogada de %s)\n", oponenteNome)
 		}
 
 		fmt.Println("-------------------")
@@ -441,6 +443,12 @@ func comprarPacote() {
 func jogarCarta(cartaID string) {
 	if salaAtual == "" {
 		fmt.Println("[ERRO] Você não está em uma partida.")
+		return
+	}
+
+	// VERIFICAÇÃO DE TURNO NO CLIENTE
+	if turnoDeQuem != meuID {
+		fmt.Println("[ERRO] Não é a sua vez de jogar. Aguarde o oponente.")
 		return
 	}
 
