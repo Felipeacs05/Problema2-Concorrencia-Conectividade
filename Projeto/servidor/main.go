@@ -1366,61 +1366,38 @@ func compararCartas(c1, c2 Carta) int {
 // notificarAguardandoOponente notifica que está aguardando o oponente jogar
 func (s *Servidor) notificarAguardandoOponente(sala *tipos.Sala) {
 	// IMPORTANTE: Esta função assume que o `sala.Mutex` JÁ ESTÁ BLOQUEADO pela função que a chamou.
-	log.Printf("[NOTIFICACAO:%s] Notificando jogadores para aguardar oponente.", sala.ID)
+	log.Printf("[NOTIFICACAO:%s] Publicando atualização de aguardo de jogada.", sala.ID)
 
-	jogadores := make([]*tipos.Cliente, len(sala.Jogadores))
-	copy(jogadores, sala.Jogadores)
-	sombraAddr := sala.ServidorSombra
-	proximoAJogarID := sala.TurnoDe
+	// Encontra o nome do jogador que deve jogar
+	var proximoJogadorNome string
+	for _, j := range sala.Jogadores {
+		if j.ID == sala.TurnoDe {
+			proximoJogadorNome = j.Nome
+			break
+		}
+	}
 
-	// Mensagem para o jogador que acabou de jogar (e não é o próximo)
-	msgAguarde := protocolo.Mensagem{
+	msg := protocolo.Mensagem{
 		Comando: "ATUALIZACAO_JOGO",
 		Dados: seguranca.MustJSON(protocolo.DadosAtualizacaoJogo{
-			MensagemDoTurno: "Você jogou. Aguardando oponente...",
-			TurnoDe:         proximoAJogarID,
+			MensagemDoTurno: fmt.Sprintf("Aguardando jogada de %s...", proximoJogadorNome),
+			NumeroRodada:    sala.NumeroRodada,
+			UltimaJogada:    sala.CartasNaMesa,
+			TurnoDe:         sala.TurnoDe,
 		}),
 	}
 
-	// Mensagem para o próximo jogador
-	msgSuaVez := protocolo.Mensagem{
-		Comando: "ATUALIZACAO_JOGO",
-		Dados: seguranca.MustJSON(protocolo.DadosAtualizacaoJogo{
-			MensagemDoTurno: "Seu oponente jogou. É a sua vez!",
-			TurnoDe:         proximoAJogarID,
-		}),
-	}
-
-	for _, jogador := range jogadores {
-		var msg protocolo.Mensagem
-		if jogador.ID == proximoAJogarID {
-			msg = msgSuaVez
-		} else {
-			msg = msgAguarde
-		}
-
-		if s.getClienteLocal(jogador.ID) != nil {
-			log.Printf("[NOTIFICACAO:%s] Enviando para jogador local %s", sala.ID, jogador.ID)
-			s.publicarParaCliente(jogador.ID, msg)
-		} else if sombraAddr != "" {
-			log.Printf("[NOTIFICACAO:%s] Enviando para jogador remoto %s via sombra %s", sala.ID, jogador.ID, sombraAddr)
-			go s.notificarJogadorRemoto(sombraAddr, jogador.ID, msg)
-		}
-	}
+	s.publicarEventoPartida(sala.ID, msg)
 }
 
 // notificarResultadoJogada notifica o resultado de uma jogada
 func (s *Servidor) notificarResultadoJogada(sala *tipos.Sala, vencedorJogada string) {
 	// IMPORTANTE: Esta função assume que o `sala.Mutex` JÁ ESTÁ BLOQUEADO pela função que a chamou (resolverJogada).
-	log.Printf("[NOTIFICACAO:%s] Notificando resultado da jogada. Vencedor: %s", sala.ID, vencedorJogada)
-
-	jogadores := make([]*tipos.Cliente, len(sala.Jogadores))
-	copy(jogadores, sala.Jogadores)
-	sombraAddr := sala.ServidorSombra
+	log.Printf("[NOTIFICACAO:%s] Publicando resultado da jogada. Vencedor: %s", sala.ID, vencedorJogada)
 
 	// Cria contagem de cartas (dentro do lock existente)
 	contagemCartas := make(map[string]int)
-	for _, j := range jogadores {
+	for _, j := range sala.Jogadores {
 		// Acesso ao inventário de um jogador de outra goroutine requer seu próprio lock
 		j.Mutex.Lock()
 		contagemCartas[j.Nome] = len(j.Inventario)
@@ -1431,7 +1408,7 @@ func (s *Servidor) notificarResultadoJogada(sala *tipos.Sala, vencedorJogada str
 	msg := protocolo.Mensagem{
 		Comando: "ATUALIZACAO_JOGO",
 		Dados: seguranca.MustJSON(protocolo.DadosAtualizacaoJogo{
-			MensagemDoTurno: fmt.Sprintf("Vencedor da jogada: %s", vencedorJogada),
+			MensagemDoTurno: fmt.Sprintf("Vencedor da jogada: %s. Próximo a jogar: %s", vencedorJogada, sala.TurnoDe),
 			NumeroRodada:    sala.NumeroRodada,
 			ContagemCartas:  contagemCartas,
 			UltimaJogada:    sala.CartasNaMesa,
@@ -1441,13 +1418,7 @@ func (s *Servidor) notificarResultadoJogada(sala *tipos.Sala, vencedorJogada str
 		}),
 	}
 
-	for _, jogador := range jogadores {
-		if s.getClienteLocal(jogador.ID) != nil {
-			s.publicarParaCliente(jogador.ID, msg)
-		} else if sombraAddr != "" {
-			go s.notificarJogadorRemoto(sombraAddr, jogador.ID, msg)
-		}
-	}
+	s.publicarEventoPartida(sala.ID, msg)
 }
 
 // finalizarPartida finaliza uma partida e determina o vencedor
