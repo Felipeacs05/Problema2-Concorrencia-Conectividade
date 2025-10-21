@@ -2355,7 +2355,17 @@ func (s *Servidor) processarCompraPacote(clienteID string, sala *Sala) {
 		jsonData, _ := json.Marshal(dados)
 		url := fmt.Sprintf("http://%s/estoque/comprar_pacote", lider)
 
-		resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonData))
+		// Cria requisição HTTP com autenticação JWT
+		req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+		if err != nil {
+			log.Printf("Erro ao criar requisição para o líder: %v", err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+generateJWT(s.ServerID))
+
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Do(req)
 		if err != nil {
 			log.Printf("Erro ao requisitar pacote do líder: %v", err)
 			return
