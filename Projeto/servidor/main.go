@@ -9,6 +9,8 @@ import (
 	"jogodistribuido/protocolo"
 	"jogodistribuido/servidor/api"
 	"jogodistribuido/servidor/cluster"
+	"jogodistribuido/servidor/game"
+	mqttManager "jogodistribuido/servidor/mqtt"
 	"jogodistribuido/servidor/seguranca"
 	"jogodistribuido/servidor/store"
 	"jogodistribuido/servidor/tipos"
@@ -49,6 +51,8 @@ type Servidor struct {
 	MQTTClient      mqtt.Client
 	ClusterManager  cluster.ClusterManagerInterface
 	Store           store.StoreInterface
+	GameManager     game.GameManagerInterface
+	MQTTManager     mqttManager.MQTTManagerInterface
 
 	// Gerenciamento de Partidas
 	Clientes        map[string]*tipos.Cliente // clienteID -> Cliente
@@ -96,15 +100,89 @@ func (s *Servidor) Run() {
 	select {} // Mantém o programa rodando
 }
 
+// Interface methods for managers
+func (s *Servidor) GetClientes() map[string]*tipos.Cliente {
+	return s.Clientes
+}
+
+func (s *Servidor) GetSalas() map[string]*tipos.Sala {
+	return s.Salas
+}
+
+func (s *Servidor) GetFilaDeEspera() []*tipos.Cliente {
+	return s.FilaDeEspera
+}
+
+func (s *Servidor) GetComandosPartida() map[string]chan protocolo.Comando {
+	return s.ComandosPartida
+}
+
+func (s *Servidor) GetMeuEndereco() string {
+	return s.MeuEndereco
+}
+
+func (s *Servidor) GetMeuEnderecoHTTP() string {
+	return s.MeuEnderecoHTTP
+}
+
+func (s *Servidor) GetBrokerMQTT() string {
+	return s.BrokerMQTT
+}
+
+func (s *Servidor) GetMQTTClient() mqtt.Client {
+	return s.MQTTClient
+}
+
+func (s *Servidor) GetClusterManager() cluster.ClusterManagerInterface {
+	return s.ClusterManager
+}
+
+func (s *Servidor) GetStore() store.StoreInterface {
+	return s.Store
+}
+
+func (s *Servidor) GetGameManager() game.GameManagerInterface {
+	return s.GameManager
+}
+
+func (s *Servidor) GetMQTTManager() mqttManager.MQTTManagerInterface {
+	return s.MQTTManager
+}
+
+func (s *Servidor) PublicarParaCliente(clienteID string, msg protocolo.Mensagem) {
+	s.publicarParaCliente(clienteID, msg)
+}
+
+func (s *Servidor) PublicarEventoPartida(salaID string, msg protocolo.Mensagem) {
+	s.publicarEventoPartida(salaID, msg)
+}
+
+func (s *Servidor) NotificarCompraSucesso(clienteID string, cartas []tipos.Carta) {
+	_, total := s.Store.GetStatusEstoque()
+	msg := protocolo.Mensagem{
+		Comando: "PACOTE_RESULTADO",
+		Dados: seguranca.MustJSON(protocolo.ComprarPacoteResp{
+			Cartas:          cartas,
+			EstoqueRestante: total,
+		}),
+	}
+	s.publicarParaCliente(clienteID, msg)
+}
+
+func (s *Servidor) GetStatusEstoque() (map[string]int, int) {
+	return s.Store.GetStatusEstoque()
+}
+
 func novoServidor(endereco, broker string) *Servidor {
 	serverID := os.Getenv("SERVER_ID")
 	if serverID == "" {
 		log.Fatal("A variável de ambiente SERVER_ID não foi definida!")
 	}
 
-	return &Servidor{
-		ServerID:        serverID, // Adiciona o ID limpo
+	servidor := &Servidor{
+		ServerID:        serverID,
 		MeuEndereco:     endereco,
+		MeuEnderecoHTTP: "http://" + endereco,
 		BrokerMQTT:      broker,
 		Store:           store.NewStore(),
 		Clientes:        make(map[string]*tipos.Cliente),
@@ -112,6 +190,14 @@ func novoServidor(endereco, broker string) *Servidor {
 		FilaDeEspera:    make([]*tipos.Cliente, 0),
 		ComandosPartida: make(map[string]chan protocolo.Comando),
 	}
+
+	// Initialize managers
+	servidor.ClusterManager = cluster.NewManager(servidor)
+	// TODO: Initialize game and MQTT managers when interfaces are simplified
+	// servidor.GameManager = game.NewManager(servidor)
+	// servidor.MQTTManager = mqttManager.NewManager(servidor)
+
+	return servidor
 }
 
 // ==================== MQTT ====================
@@ -369,197 +455,6 @@ func (s *Servidor) publicarEventoPartida(salaID string, msg protocolo.Mensagem) 
 	payload, _ := json.Marshal(msg)
 	topico := fmt.Sprintf("partidas/%s/eventos", salaID)
 	s.MQTTClient.Publish(topico, 0, false, payload)
-}
-
-// ==================== GERENCIAMENTO DE ESTOQUE ====================
-
-func randomString(length int) string {
-	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, length)
-	for i := range b {
-		b[i] = charset[rand.Intn(len(charset))]
-	}
-	return string(b)
-}
-
-func (s *Servidor) inicializarEstoque() {
-	s.mutexEstoque.Lock()
-	defer s.mutexEstoque.Unlock()
-
-	s.Estoque = map[string][]Carta{
-		"C": make([]Carta, 0),
-		"U": make([]Carta, 0),
-		"R": make([]Carta, 0),
-		"L": make([]Carta, 0),
-	}
-
-	// Gera estoque inicial de cartas
-	tiposCartas := []string{
-		"Dragão", "Guerreiro", "Mago", "Anjo", "Demônio", "Fênix", "Titan", "Sereia",
-		"Lobo", "Águia", "Leão", "Tigre", "Cavaleiro", "Arqueiro", "Bárbaro", "Paladino",
-	}
-	naipes := []string{"♠", "♥", "♦", "♣"}
-
-	for _, nome := range tiposCartas {
-		// Comuns: 100 por tipo
-		for i := 0; i < 100; i++ {
-			s.Estoque["C"] = append(s.Estoque["C"], Carta{
-				ID:       randomString(5),
-				Nome:     nome,
-				Naipe:    naipes[rand.Intn(len(naipes))],
-				Valor:    1 + rand.Intn(50),
-				Raridade: "C",
-			})
-		}
-
-		// Incomuns: 50 por tipo
-		for i := 0; i < 50; i++ {
-			s.Estoque["U"] = append(s.Estoque["U"], Carta{
-				ID:       randomString(5),
-				Nome:     nome,
-				Naipe:    naipes[rand.Intn(len(naipes))],
-				Valor:    51 + rand.Intn(30),
-				Raridade: "U",
-			})
-		}
-
-		// Raras: 20 por tipo
-		for i := 0; i < 20; i++ {
-			s.Estoque["R"] = append(s.Estoque["R"], Carta{
-				ID:       randomString(5),
-				Nome:     nome,
-				Naipe:    naipes[rand.Intn(len(naipes))],
-				Valor:    81 + rand.Intn(20),
-				Raridade: "R",
-			})
-		}
-
-		// Lendárias: 5 por tipo
-		for i := 0; i < 5; i++ {
-			s.Estoque["L"] = append(s.Estoque["L"], Carta{
-				ID:       randomString(5),
-				Nome:     nome,
-				Naipe:    naipes[rand.Intn(len(naipes))],
-				Valor:    101 + rand.Intn(20),
-				Raridade: "L",
-			})
-		}
-	}
-
-	log.Printf("Estoque inicializado: C=%d, U=%d, R=%d, L=%d",
-		len(s.Estoque["C"]), len(s.Estoque["U"]), len(s.Estoque["R"]), len(s.Estoque["L"]))
-}
-
-func (s *Servidor) retirarCartasDoEstoque(quantidade int) []Carta {
-	s.mutexEstoque.Lock()
-	defer s.mutexEstoque.Unlock()
-
-	log.Printf("[ESTOQUE_DEBUG] Retirando %d cartas do estoque", quantidade)
-	log.Printf("[ESTOQUE_DEBUG] Estoque atual: C=%d, U=%d, R=%d, L=%d",
-		len(s.Estoque["C"]), len(s.Estoque["U"]), len(s.Estoque["R"]), len(s.Estoque["L"]))
-
-	cartas := make([]Carta, 0, quantidade)
-
-	for i := 0; i < quantidade; i++ {
-		raridade := sampleRaridade()
-
-		// Tenta encontrar carta da raridade desejada com downgrade
-		ordem := []string{"L", "R", "U", "C"}
-		var start int
-		switch raridade {
-		case "L":
-			start = 0
-		case "R":
-			start = 1
-		case "U":
-			start = 2
-		default:
-			start = 3
-		}
-
-		var carta Carta
-		encontrou := false
-		for j := start; j < len(ordem); j++ {
-			r := ordem[j]
-			if len(s.Estoque[r]) > 0 {
-				// Remove a última carta
-				idx := len(s.Estoque[r]) - 1
-				carta = s.Estoque[r][idx]
-				s.Estoque[r] = s.Estoque[r][:idx]
-				encontrou = true
-				break
-			}
-		}
-
-		if !encontrou {
-			// Gera carta comum básica se estoque acabou
-			carta = s.gerarCartaComum()
-		}
-
-		cartas = append(cartas, carta)
-	}
-
-	return cartas
-}
-
-func (s *Servidor) gerarCartaComum() Carta {
-	nomes := []string{"Guerreiro", "Arqueiro", "Mago", "Cavaleiro", "Ladrão"}
-	naipes := []string{"♠", "♥", "♦", "♣"}
-
-	return Carta{
-		ID:       randomString(5),
-		Nome:     nomes[rand.Intn(len(nomes))],
-		Naipe:    naipes[rand.Intn(len(naipes))],
-		Valor:    1 + rand.Intn(50),
-		Raridade: "C",
-	}
-}
-
-func (s *Servidor) contarEstoque() int {
-	total := 0
-	for _, cartas := range s.Estoque {
-		total += len(cartas)
-	}
-	return total
-}
-
-func (s *Servidor) contarEstoqueTotal() int {
-	s.mutexEstoque.RLock()
-	defer s.mutexEstoque.RUnlock()
-	total := 0
-	for _, cartas := range s.Estoque {
-		total += len(cartas)
-	}
-	return total
-}
-
-func sampleRaridade() string {
-	x := rand.Intn(100)
-	if x < 70 {
-		return "C"
-	}
-	if x < 90 {
-		return "U"
-	}
-	if x < 99 {
-		return "R"
-	}
-	return "L"
-}
-
-// escolherRaridade retorna uma raridade aleatória para formar o pacote.
-func (s *Servidor) escolherRaridade() string {
-	x := rand.Intn(100)
-	if x < 70 {
-		return "C"
-	}
-	if x < 90 {
-		return "U"
-	}
-	if x < 99 {
-		return "R"
-	}
-	return "L"
 }
 
 // ==================== MATCHMAKING E LÓGICA DE JOGO ====================
@@ -876,7 +771,7 @@ func (s *Servidor) processarCompraPacote(clienteID string, sala *tipos.Sala) {
 	cartas := make([]Carta, 0) // Inicializa como slice vazio, não nil
 
 	if souLider {
-		cartas = s.retirarCartasDoEstoque(PACOTE_SIZE)
+		cartas = s.Store.FormarPacote(PACOTE_SIZE)
 		log.Printf("[COMPRAR_DEBUG] Líder retirou %d cartas do estoque", len(cartas))
 	} else {
 		// Faz requisição HTTP para o líder
@@ -924,11 +819,12 @@ func (s *Servidor) processarCompraPacote(clienteID string, sala *tipos.Sala) {
 	cliente.Mutex.Unlock()
 
 	// Notifica cliente
+	_, total := s.Store.GetStatusEstoque()
 	msg := protocolo.Mensagem{
 		Comando: "PACOTE_RESULTADO",
 		Dados: seguranca.MustJSON(protocolo.ComprarPacoteResp{
 			Cartas:          cartas,
-			EstoqueRestante: s.contarEstoqueTotal(),
+			EstoqueRestante: total,
 		}),
 	}
 	// Correção: Notifica o cliente localmente via MQTT ou remotamente via API
@@ -1738,25 +1634,4 @@ func (s *Servidor) EncaminharParaLider(c *gin.Context) {
 
 func (s *Servidor) FormarPacote() ([]tipos.Carta, error) {
 	return s.Store.FormarPacote(PACOTE_SIZE), nil
-}
-
-func (s *Servidor) NotificarCompraSucesso(clienteID string, pacote []tipos.Carta) {
-	_, total := s.Store.GetStatusEstoque()
-	msg := protocolo.Mensagem{
-		Comando: "PACOTE_RESULTADO",
-		Dados: seguranca.MustJSON(protocolo.ComprarPacoteResp{
-			Cartas:          pacote,
-			EstoqueRestante: total,
-		}),
-	}
-	s.publicarParaCliente(clienteID, msg)
-}
-
-func (s *Servidor) GetStatusEstoque() (map[string]int, int) {
-	return s.Store.GetStatusEstoque()
-}
-
-// Implementação da interface para o cluster
-func (s *Servidor) GetMeuEndereco() string {
-	return s.MeuEndereco
 }
