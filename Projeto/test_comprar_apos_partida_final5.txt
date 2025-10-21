@@ -1,0 +1,3 @@
+JogadorAposPartidaFinal5
+2
+/comprar

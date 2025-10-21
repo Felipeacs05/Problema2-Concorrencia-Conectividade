@@ -80,6 +80,9 @@ func main() {
 	for scanner.Scan() {
 		entrada := strings.TrimSpace(scanner.Text())
 		processarComando(entrada)
+
+		// Aguarda um pouco para receber mensagens
+		time.Sleep(100 * time.Millisecond)
 		fmt.Print("> ")
 	}
 }
@@ -153,12 +156,15 @@ func fazerLogin() error {
 			json.Unmarshal(resp.Dados, &dados)
 			meuID = dados["cliente_id"] // Guarda o ID permanente recebido do servidor
 			servidor := dados["servidor"]
-			fmt.Printf("\n[LOGIN] Conectado ao servidor %s\n", servidor)
+			fmt.Printf("\n[LOGIN] Conectado ao servidor %s (ID: %s)\n", servidor, meuID)
 
 			// Limpa a inscrição temporária e inscreve-se na permanente
 			mqttClient.Unsubscribe(responseTopic)
 			permanentTopic := fmt.Sprintf("clientes/%s/eventos", meuID)
-			mqttClient.Subscribe(permanentTopic, 1, handleMensagemServidor)
+			if token := mqttClient.Subscribe(permanentTopic, 1, handleMensagemServidor); token.Wait() && token.Error() != nil {
+				return fmt.Errorf("falha ao se inscrever no tópico permanente: %v", token.Error())
+			}
+			fmt.Printf("[DEBUG] Inscrito no tópico permanente: %s\n", permanentTopic)
 			return nil
 		}
 		return fmt.Errorf("resposta de login inesperada: %s", resp.Comando)
@@ -179,12 +185,14 @@ func entrarNaFila() {
 var messageChan = make(chan protocolo.Mensagem, 10)
 
 func handleMensagemServidor(client mqtt.Client, msg mqtt.Message) {
+	fmt.Printf("[DEBUG] Mensagem MQTT recebida no tópico: %s\n", msg.Topic())
 	var mensagem protocolo.Mensagem
 	if err := json.Unmarshal(msg.Payload(), &mensagem); err != nil {
 		log.Printf("Erro ao decodificar mensagem: %v", err)
 		return
 	}
 
+	fmt.Printf("[DEBUG] Mensagem decodificada: %s\n", string(msg.Payload()))
 	// Processa a mensagem
 	processarMensagemServidor(mensagem)
 }
@@ -213,7 +221,7 @@ func processarMensagemServidor(msg protocolo.Mensagem) {
 		oponenteID = dados.OponenteID
 		oponenteNome = dados.OponenteNome
 
-		fmt.Printf("\n[PARTIDA] Partida encontrada contra '%s'!\n", oponenteNome)
+		fmt.Printf("\n[PARTIDA] Partida encontrada contra '%s'! (Sala: %s)\n", oponenteNome, salaAtual)
 		fmt.Println("Use /comprar para adquirir seu pacote inicial de cartas.")
 
 		// Subscreve aos eventos da partida
@@ -251,10 +259,23 @@ func processarMensagemServidor(msg protocolo.Mensagem) {
 		json.Unmarshal(msg.Dados, &dados)
 		fmt.Printf("\n[SISTEMA] %s\n> ", dados.Mensagem)
 
-	case "ERRO":
+	case "ERRO", "ERRO_JOGADA":
 		var dados protocolo.DadosErro
 		json.Unmarshal(msg.Dados, &dados)
 		fmt.Printf("\n[ERRO] %s\n> ", dados.Mensagem)
+
+	case "CHAT_RECEBIDO":
+		var dados protocolo.DadosReceberChat
+		if err := json.Unmarshal(msg.Dados, &dados); err == nil {
+			prefixo := dados.NomeJogador
+			if dados.NomeJogador == meuNome {
+				prefixo = "[VOCÊ]"
+			}
+			// Usa \r para potencialmente limpar a linha atual antes de imprimir
+			fmt.Printf("\r💬 %s: %s\n> ", prefixo, dados.Texto)
+		} else {
+			log.Printf("Erro ao decodificar dados do chat: %v", err)
+		}
 
 	default:
 		fmt.Printf("\n[DEBUG] Comando não reconhecido: %s\n> ", msg.Comando)
@@ -267,6 +288,11 @@ func handleEventoPartida(client mqtt.Client, msg mqtt.Message) {
 		log.Printf("Erro ao decodificar evento da partida: %v", err)
 		return
 	}
+
+	// --- ADICIONE ESTE LOG PARA DEPURAR ---
+	log.Printf("[DEBUG] Mensagem MQTT recebida no tópico da partida: %s", msg.Topic())
+	log.Printf("[DEBUG] Mensagem decodificada: %+v", mensagem)
+	// --- FIM DA ADIÇÃO ---
 
 	switch mensagem.Comando {
 	case "PARTIDA_INICIADA":
@@ -326,6 +352,11 @@ func handleEventoPartida(client mqtt.Client, msg mqtt.Message) {
 		fmt.Printf("╚═══════════════════════════════════════╝\n")
 		fmt.Print("> ")
 
+	case "ERRO_JOGADA":
+		var dados protocolo.DadosErro
+		json.Unmarshal(mensagem.Dados, &dados)
+		fmt.Printf("\n[JOGADA_INVALIDA] %s\n> ", dados.Mensagem)
+
 	case "RECEBER_CHAT":
 		var dados protocolo.DadosReceberChat
 		json.Unmarshal(mensagem.Dados, &dados)
@@ -335,6 +366,10 @@ func handleEventoPartida(client mqtt.Client, msg mqtt.Message) {
 			prefixo = "[VOCÊ]"
 		}
 		fmt.Printf("\n💬 %s: %s\n> ", prefixo, dados.Texto)
+
+	default: // Adiciona um caso default para debugging
+		log.Printf("[DEBUG] Comando de partida não reconhecido: %s", mensagem.Comando)
+		fmt.Print("> ") // Garante que o prompt aparece
 	}
 }
 
@@ -380,6 +415,7 @@ func processarComando(entrada string) {
 }
 
 func comprarPacote() {
+	fmt.Printf("[DEBUG] comprarPacote chamada, salaAtual: '%s'\n", salaAtual)
 	if salaAtual == "" {
 		fmt.Println("[ERRO] Você não está em uma partida.")
 		return
@@ -393,6 +429,9 @@ func comprarPacote() {
 
 	payload, _ := json.Marshal(mensagem)
 	topico := fmt.Sprintf("partidas/%s/comandos", salaAtual)
+	fmt.Printf("[DEBUG] Enviando comando para tópico: %s\n", topico)
+	fmt.Printf("[DEBUG] Payload: %s\n", string(payload))
+
 	token := mqttClient.Publish(topico, 0, false, payload)
 	token.Wait()
 
@@ -441,19 +480,15 @@ func jogarCarta(cartaID string) {
 
 func enviarChat(texto string) {
 	if salaAtual == "" {
-		return
+		return // Não faz sentido enviar chat se não estiver em sala
 	}
-
-	dados := map[string]string{
-		"cliente_id": meuID,
-		"texto":      texto,
-	}
-	mensagem := protocolo.Mensagem{
-		Comando: "ENVIAR_CHAT",
+	dados := protocolo.DadosEnviarChat{ClienteID: meuID, Texto: texto}
+	msg := protocolo.Mensagem{
+		Comando: "CHAT",
 		Dados:   mustJSON(dados),
 	}
 
-	payload, _ := json.Marshal(mensagem)
+	payload, _ := json.Marshal(msg)
 	topico := fmt.Sprintf("partidas/%s/comandos", salaAtual)
 	token := mqttClient.Publish(topico, 0, false, payload)
 	token.Wait()

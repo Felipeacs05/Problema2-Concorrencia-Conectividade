@@ -1,0 +1,3 @@
+JogadorAposPartidaFinal8
+2
+/comprar

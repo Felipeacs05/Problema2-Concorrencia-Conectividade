@@ -1,0 +1,3 @@
+JogadorAposPartida2
+2
+/comprar

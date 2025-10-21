@@ -1,0 +1,2 @@
+JogadorAposPartidaManual
+2
