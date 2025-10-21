@@ -1274,7 +1274,15 @@ func (s *Servidor) replicarEstadoParaShadow(shadowAddr string, estado *tipos.Est
 
 // resolverJogada resolve uma jogada quando ambos os jogadores jogaram
 func (s *Servidor) resolverJogada(sala *tipos.Sala) {
-	if len(sala.Jogadores) != 2 {
+	// IMPORTANTE: Esta função assume que o `sala.Mutex` JÁ ESTÁ BLOQUEADO pela função que a chamou (ex: processarJogadaComoHost)
+	log.Printf("[JOGADA_RESOLVER:%s] Resolvendo jogada...", sala.ID)
+
+	// Garante que a operação seja atômica na sala
+	// sala.Mutex.Lock() <--- REMOVIDO PARA EVITAR DEADLOCK
+	// defer sala.Mutex.Unlock() <--- REMOVIDO
+
+	if len(sala.CartasNaMesa) != 2 {
+		log.Printf("[JOGO_ERRO:%s] Tentativa de resolver jogada com %d cartas na mesa.", sala.ID, len(sala.CartasNaMesa))
 		return
 	}
 
