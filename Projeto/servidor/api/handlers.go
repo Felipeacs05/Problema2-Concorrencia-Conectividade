@@ -184,7 +184,39 @@ func (s *Server) handleNotificarPronto(c *gin.Context) {
 
 // HANDLERS DE MATCHMAKING GLOBAL
 func (s *Server) handleSolicitarOponente(c *gin.Context) {
-	// ... (código a ser movido)
+	var req struct {
+		SolicitanteID   string `json:"solicitante_id"`
+		SolicitanteNome string `json:"solicitante_nome"`
+		ServidorOrigem  string `json:"servidor_origem"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Dados inválidos"})
+		return
+	}
+
+	// Verifica se há jogadores na fila local
+	fila := s.servidor.GetFilaDeEspera()
+	if len(fila) > 0 {
+		// Encontrou oponente local
+		oponente := fila[0]
+
+		// Remove da fila (isso seria feito pelo servidor principal)
+		// Por enquanto, apenas retorna a resposta
+
+		c.JSON(http.StatusOK, gin.H{
+			"partida_encontrada": true,
+			"sala_id":            "sala_local_" + req.SolicitanteID,
+			"oponente_nome":      oponente.Nome,
+			"servidor_host":      s.servidor.GetMeuEndereco(),
+		})
+		return
+	}
+
+	// Não encontrou oponente
+	c.JSON(http.StatusOK, gin.H{
+		"partida_encontrada": false,
+	})
 }
 
 func (s *Server) handleConfirmarPartida(c *gin.Context) {

@@ -15,6 +15,8 @@ type ServidorInterface interface {
 	FormarPacote() ([]tipos.Carta, error)
 	NotificarCompraSucesso(string, []tipos.Carta)
 	GetStatusEstoque() (map[string]int, int)
+	GetFilaDeEspera() []*tipos.Cliente
+	GetMeuEndereco() string
 }
 
 type Server struct {

@@ -31,8 +31,8 @@ import (
 // ==================== CONFIGURAÇÃO E CONSTANTES ====================
 
 const (
-	ELEICAO_TIMEOUT     = 10 * time.Second
-	HEARTBEAT_INTERVALO = 3 * time.Second
+	ELEICAO_TIMEOUT     = 30 * time.Second // Aumentado para 30 segundos
+	HEARTBEAT_INTERVALO = 5 * time.Second  // Aumentado para 5 segundos
 	PACOTE_SIZE         = 5
 	JWT_SECRET          = "jogo_distribuido_secret_key_2025" // Chave secreta compartilhada entre servidores
 	JWT_EXPIRATION      = 24 * time.Hour                     // Tokens expiram em 24 horas
@@ -597,7 +597,7 @@ func (s *Servidor) realizarSolicitacaoMatchmaking(addr string, cliente *tipos.Cl
 		"servidor_origem":  s.MeuEndereco,
 	})
 
-	httpClient := &http.Client{Timeout: 3 * time.Second}
+	httpClient := &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s/matchmaking/solicitar_oponente", addr), bytes.NewBuffer(reqBody))
 	if err != nil {
 		log.Printf("[MATCHMAKING-TX] Erro ao criar requisição para %s: %v", addr, err)
@@ -1182,7 +1182,7 @@ func (s *Servidor) replicarEstadoParaShadow(shadowAddr string, estado *tipos.Est
 	jsonData, _ := json.Marshal(req)
 	url := fmt.Sprintf("http://%s/game/replicate", shadowAddr)
 
-	httpClient := &http.Client{Timeout: 3 * time.Second}
+	httpClient := &http.Client{Timeout: 10 * time.Second}
 
 	httpReq, _ := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -1527,18 +1527,17 @@ func (s *Servidor) notificarJogadorRemoto(servidor string, clienteID string, msg
 		"cliente_id": clienteID,
 		"mensagem":   msg,
 	})
-	httpClient := &http.Client{Timeout: 3 * time.Second}
+	httpClient := &http.Client{Timeout: 10 * time.Second}
 	httpClient.Post(fmt.Sprintf("http://%s/partida/notificar_jogador", servidor), "application/json", bytes.NewBuffer(reqBody))
 }
 
 func (s *Servidor) getClienteLocal(clienteID string) *tipos.Cliente {
 	s.mutexClientes.RLock()
 	defer s.mutexClientes.RUnlock()
-	// Esta função é um placeholder, a lógica real está em encontrar o cliente na sala.
-	// Uma implementação melhor verificaria se o cliente está conectado a este broker.
-	_, ok := s.Clientes[clienteID]
+	// Verifica se o cliente está conectado a este servidor
+	cliente, ok := s.Clientes[clienteID]
 	if ok {
-		return s.Clientes[clienteID]
+		return cliente
 	}
 	return nil
 }

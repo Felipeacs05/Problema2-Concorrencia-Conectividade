@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	ELEICAO_TIMEOUT     = 10 * time.Second
-	HEARTBEAT_INTERVALO = 3 * time.Second
+	ELEICAO_TIMEOUT     = 30 * time.Second // Aumentado para 30 segundos
+	HEARTBEAT_INTERVALO = 5 * time.Second  // Aumentado para 5 segundos
 )
 
 type ServidorInterface interface {
