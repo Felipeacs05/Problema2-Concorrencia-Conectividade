@@ -259,7 +259,7 @@ func processarMensagemServidor(msg protocolo.Mensagem) {
 		json.Unmarshal(msg.Dados, &dados)
 		fmt.Printf("\n[SISTEMA] %s\n> ", dados.Mensagem)
 
-	case "ERRO":
+	case "ERRO", "ERRO_JOGADA":
 		var dados protocolo.DadosErro
 		json.Unmarshal(msg.Dados, &dados)
 		fmt.Printf("\n[ERRO] %s\n> ", dados.Mensagem)
@@ -271,6 +271,7 @@ func processarMensagemServidor(msg protocolo.Mensagem) {
 			if dados.NomeJogador == meuNome {
 				prefixo = "[VOCÊ]"
 			}
+			// Usa \r para potencialmente limpar a linha atual antes de imprimir
 			fmt.Printf("\r💬 %s: %s\n> ", prefixo, dados.Texto)
 		} else {
 			log.Printf("Erro ao decodificar dados do chat: %v", err)
@@ -356,20 +357,6 @@ func handleEventoPartida(client mqtt.Client, msg mqtt.Message) {
 		json.Unmarshal(mensagem.Dados, &dados)
 		fmt.Printf("\n[JOGADA_INVALIDA] %s\n> ", dados.Mensagem)
 
-	// --- ADICIONE ESTE CASE ---
-	case "CHAT_RECEBIDO": // Ou "RECEBER_CHAT" se o servidor estiver a enviar isso
-		var dados protocolo.DadosReceberChat
-		if err := json.Unmarshal(mensagem.Dados, &dados); err == nil {
-			prefixo := dados.NomeJogador
-			if dados.NomeJogador == meuNome {
-				prefixo = "[VOCÊ]"
-			}
-			// Usa \r para potencialmente limpar a linha atual antes de imprimir
-			fmt.Printf("\r💬 %s: %s\n> ", prefixo, dados.Texto)
-		} else {
-			log.Printf("Erro ao decodificar dados do chat: %v", err)
-		}
-	// --- FIM DA ADIÇÃO ---
 	case "RECEBER_CHAT":
 		var dados protocolo.DadosReceberChat
 		json.Unmarshal(mensagem.Dados, &dados)

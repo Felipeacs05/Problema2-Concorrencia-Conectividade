@@ -62,6 +62,7 @@ type Servidor struct {
 	FilaDeEspera    []*tipos.Cliente
 	mutexFila       sync.Mutex
 	ComandosPartida map[string]chan protocolo.Comando
+	mutexComandos   sync.Mutex
 }
 
 // ==================== INICIALIZAÇÃO ====================
@@ -1052,21 +1053,15 @@ func (s *Servidor) promoverSombraAHost(sala *tipos.Sala) {
 
 // processarJogadaComoHost processa uma jogada quando este servidor é o Host
 func (s *Servidor) processarJogadaComoHost(sala *tipos.Sala, clienteID, cartaID string) *tipos.EstadoPartida {
-	s.mutexSalas.RLock()
-	sala, ok := s.Salas[sala.ID]
-	s.mutexSalas.RUnlock()
-	if !ok {
-		log.Printf("[JOGO_ERRO] Sala %s não encontrada para processar jogada.", sala.ID)
-		return nil
-	}
-
-	log.Printf("[JOGO_DEBUG] Host processando jogada. Sala: %s, Cliente: %s, Carta: %s", sala.ID, clienteID, cartaID)
+	log.Printf("[JOGADA_HOST:%s] Entrando em processarJogadaComoHost para cliente %s", sala.ID, clienteID)
+	defer log.Printf("[JOGADA_HOST:%s] Saindo de processarJogadaComoHost", sala.ID)
 
 	sala.Mutex.Lock()
 	defer sala.Mutex.Unlock()
 
 	if sala.Estado != "JOGANDO" {
-		log.Printf("[JOGO_ERRO] Partida %s não está em andamento.", sala.ID)
+		log.Printf("[JOGO_ERRO:%s] Partida não está em andamento.", sala.ID)
+		s.notificarErroPartida(clienteID, "A partida não está em andamento.", sala.ID)
 		return nil
 	}
 
@@ -1222,7 +1217,23 @@ func (s *Servidor) processarJogadaComoHost(sala *tipos.Sala, clienteID, cartaID 
 			go s.notificarJogadorRemoto(sala.ServidorSombra, jogadorRemotoID, msgUpdate)
 		}
 	}
-	return estado
+
+	// Verifica se a jogada terminou (ambos jogaram)
+	if len(sala.CartasNaMesa) == 2 {
+		s.resolverJogada(sala) // Esta função determinará o vencedor e o próximo a jogar
+	} else {
+		// Apenas um jogador jogou, passa o turno para o outro.
+		for _, jogador := range sala.Jogadores {
+			if jogador.ID != clienteID {
+				sala.TurnoDe = jogador.ID
+				log.Printf("[TURNO:%s] Jogador %s jogou. Próximo a jogar: %s (%s)", sala.ID, clienteID, jogador.Nome, jogador.ID)
+				break
+			}
+		}
+	}
+
+	// Retorna o estado atualizado da sala. A notificação será montada por quem chamou.
+	return s.criarEstadoDaSala(sala)
 }
 
 // replicarEstadoParaShadow replica o estado para o servidor Shadow usando o endpoint /game/replicate
