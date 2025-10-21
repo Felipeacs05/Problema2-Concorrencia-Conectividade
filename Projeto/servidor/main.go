@@ -187,6 +187,13 @@ func (s *Servidor) AtualizarEstadoSalaRemoto(estado tipos.EstadoPartida) {
 	sala.Mutex.Unlock()
 
 	log.Printf("[SYNC_SOMBRA_OK] Sala %s atualizada. Novo estado: %s, Turno de: %s", sala.ID, sala.Estado, sala.TurnoDe)
+	log.Printf("[SYNC_SOMBRA_DEBUG] Jogadores na sala: %v", func() []string {
+		ids := make([]string, len(sala.Jogadores))
+		for i, j := range sala.Jogadores {
+			ids[i] = fmt.Sprintf("%s(%s)", j.Nome, j.ID)
+		}
+		return ids
+	}())
 }
 
 func (s *Servidor) CriarSalaRemota(solicitante, oponente *tipos.Cliente) {
@@ -920,6 +927,7 @@ func (s *Servidor) iniciarPartida(sala *tipos.Sala) {
 	sala.Mutex.Unlock()
 
 	log.Printf("[JOGO_DEBUG] Partida %s iniciada. Jogador inicial: %s (%s)", sala.ID, jogadorInicial.Nome, jogadorInicial.ID)
+	log.Printf("[JOGO_DEBUG] TurnoDe definido como: %s", sala.TurnoDe)
 
 	msg := protocolo.Mensagem{
 		Comando: "PARTIDA_INICIADA",
@@ -1067,6 +1075,13 @@ func (s *Servidor) processarJogadaComoHost(sala *tipos.Sala, clienteID, cartaID 
 
 	if clienteID != sala.TurnoDe {
 		log.Printf("[JOGO_AVISO] Jogada fora de turno. Cliente: %s, Turno de: %s", clienteID, sala.TurnoDe)
+		log.Printf("[JOGO_DEBUG] Estado da sala: %s, Jogadores: %v", sala.Estado, func() []string {
+			ids := make([]string, len(sala.Jogadores))
+			for i, j := range sala.Jogadores {
+				ids[i] = fmt.Sprintf("%s(%s)", j.Nome, j.ID)
+			}
+			return ids
+		}())
 		s.notificarErroPartida(clienteID, "Não é sua vez de jogar.", sala.ID)
 		return nil
 	}
