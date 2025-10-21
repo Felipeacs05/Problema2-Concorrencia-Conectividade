@@ -1378,6 +1378,7 @@ func (s *Servidor) notificarAguardandoOponente(sala *tipos.Sala) {
 		Comando: "ATUALIZACAO_JOGO",
 		Dados: seguranca.MustJSON(protocolo.DadosAtualizacaoJogo{
 			MensagemDoTurno: "Você jogou. Aguardando oponente...",
+			TurnoDe:         proximoAJogarID,
 		}),
 	}
 
@@ -1386,6 +1387,7 @@ func (s *Servidor) notificarAguardandoOponente(sala *tipos.Sala) {
 		Comando: "ATUALIZACAO_JOGO",
 		Dados: seguranca.MustJSON(protocolo.DadosAtualizacaoJogo{
 			MensagemDoTurno: "Seu oponente jogou. É a sua vez!",
+			TurnoDe:         proximoAJogarID,
 		}),
 	}
 
@@ -1435,6 +1437,7 @@ func (s *Servidor) notificarResultadoJogada(sala *tipos.Sala, vencedorJogada str
 			UltimaJogada:    sala.CartasNaMesa,
 			VencedorJogada:  vencedorJogada,
 			SalaID:          sala.ID,
+			TurnoDe:         sala.TurnoDe,
 		}),
 	}
 

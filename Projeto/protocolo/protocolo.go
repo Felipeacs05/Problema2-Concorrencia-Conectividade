@@ -80,15 +80,16 @@ type DadosReceberChat struct {
 
 // Estrutura principal para atualizações do estado do jogo
 type DadosAtualizacaoJogo struct {
-	MensagemDoTurno string           `json:"mensagemDoTurno"` // Mensagem descritiva do que aconteceu
-	ContagemCartas  map[string]int   `json:"contagemCartas"`  // nome -> cartas restantes no inventário
-	UltimaJogada    map[string]Carta `json:"ultimaJogada"`    // nome -> carta recém jogada na mesa
-	VencedorJogada  string           `json:"vencedorJogada"`  // nome do vencedor da jogada atual / "EMPATE" / ""
-	VencedorRodada  string           `json:"vencedorRodada"`  // nome do vencedor da rodada / "EMPATE" / ""
-	NumeroRodada    int              `json:"numeroRodada"`    // Número da rodada atual (1, 2, 3...)
-	PontosRodada    map[string]int   `json:"pontosRodada"`    // nome -> pontos na rodada atual
-	PontosPartida   map[string]int   `json:"pontosPartida"`   // nome -> rodadas ganhas na partida
-	SalaID          string           `json:"sala_id"`         // ID da sala para roteamento na sombra
+	MensagemDoTurno string           `json:"mensagem_do_turno"` // Mensagem descritiva do que aconteceu
+	ContagemCartas  map[string]int   `json:"contagem_cartas"`   // nome -> cartas restantes no inventário
+	UltimaJogada    map[string]Carta `json:"ultima_jogada"`     // nome -> carta recém jogada na mesa
+	VencedorJogada  string           `json:"vencedor_jogada"`   // nome do vencedor da jogada atual / "EMPATE" / ""
+	VencedorRodada  string           `json:"vencedor_rodada"`   // nome do vencedor da rodada / "EMPATE" / ""
+	NumeroRodada    int              `json:"numero_rodada"`     // Número da rodada atual (1, 2, 3...)
+	PontosRodada    map[string]int   `json:"pontos_rodada"`     // nome -> pontos na rodada atual
+	PontosPartida   map[string]int   `json:"pontos_partida"`    // nome -> rodadas ganhas na partida
+	SalaID          string           `json:"sala_id"`           // ID da sala para roteamento na sombra
+	TurnoDe         string           `json:"turnoDe"`           // ID do jogador que deve jogar
 }
 
 // Notificação de fim de partida
