@@ -420,26 +420,30 @@ func (s *Servidor) handleClienteEntrarFila(client mqtt.Client, msg mqtt.Message)
 }
 
 func (s *Servidor) handleComandoPartida(client mqtt.Client, msg mqtt.Message) {
+	// CORREÇÃO: Adicionar logs detalhados para debugging
+	timestamp := time.Now().Format("15:04:05.000")
+	log.Printf("[%s][COMANDO_DEBUG] === INÍCIO PROCESSAMENTO COMANDO ===", timestamp)
+
 	// Extrai o ID da sala do tópico
 	topico := msg.Topic()
 	// topico formato: "partidas/{salaID}/comandos"
 	partes := strings.Split(topico, "/")
 	if len(partes) < 2 {
-		log.Printf("Tópico inválido: %s", topico)
+		log.Printf("[%s][COMANDO_ERRO] Tópico inválido: %s", timestamp, topico)
 		return
 	}
 	salaID := partes[1]
 
-	log.Printf("[COMANDO_DEBUG] Comando recebido no tópico: %s", topico)
-	log.Printf("[COMANDO_DEBUG] Payload: %s", string(msg.Payload()))
+	log.Printf("[%s][COMANDO_DEBUG] Comando recebido no tópico: %s", timestamp, topico)
+	log.Printf("[%s][COMANDO_DEBUG] Payload: %s", timestamp, string(msg.Payload()))
 
 	var mensagem protocolo.Mensagem
 	if err := json.Unmarshal(msg.Payload(), &mensagem); err != nil {
-		log.Printf("Erro ao decodificar comando: %v", err)
+		log.Printf("[%s][COMANDO_ERRO] Erro ao decodificar comando: %v", timestamp, err)
 		return
 	}
 
-	log.Printf("[COMANDO_DEBUG] Comando decodificado: %s", mensagem.Comando)
+	log.Printf("[%s][COMANDO_DEBUG] Comando decodificado: %s", timestamp, mensagem.Comando)
 
 	s.mutexSalas.RLock()
 	sala, existe := s.Salas[salaID]
@@ -1067,11 +1071,19 @@ func (s *Servidor) promoverSombraAHost(sala *tipos.Sala) {
 
 // processarJogadaComoHost processa uma jogada quando este servidor é o Host
 func (s *Servidor) processarJogadaComoHost(sala *tipos.Sala, clienteID, cartaID string) *tipos.EstadoPartida {
-	log.Printf("[JOGADA_HOST:%s] Entrando em processarJogadaComoHost para cliente %s", sala.ID, clienteID)
-	defer log.Printf("[JOGADA_HOST:%s] Saindo de processarJogadaComoHost", sala.ID)
+	timestamp := time.Now().Format("15:04:05.000")
+	log.Printf("[%s][JOGADA_HOST:%s] === INÍCIO PROCESSAMENTO JOGADA ===", timestamp, sala.ID)
+	log.Printf("[%s][JOGADA_HOST:%s] Cliente: %s, Carta: %s", timestamp, sala.ID, clienteID, cartaID)
+	defer log.Printf("[%s][JOGADA_HOST:%s] === FIM PROCESSAMENTO JOGADA ===", timestamp, sala.ID)
 
+	log.Printf("[%s][JOGADA_HOST:%s] TENTANDO LOCK DA SALA...", timestamp, sala.ID)
 	sala.Mutex.Lock()
-	defer sala.Mutex.Unlock()
+	log.Printf("[%s][JOGADA_HOST:%s] LOCK DA SALA OBTIDO", timestamp, sala.ID)
+	defer func() {
+		log.Printf("[%s][JOGADA_HOST:%s] LIBERANDO LOCK DA SALA...", timestamp, sala.ID)
+		sala.Mutex.Unlock()
+		log.Printf("[%s][JOGADA_HOST:%s] LOCK DA SALA LIBERADO", timestamp, sala.ID)
+	}()
 
 	if sala.Estado != "JOGANDO" {
 		log.Printf("[JOGO_ERRO:%s] Partida não está em andamento.", sala.ID)
@@ -1254,8 +1266,16 @@ func (s *Servidor) processarJogadaComoHost(sala *tipos.Sala, clienteID, cartaID 
 		}
 	}
 
-	// Retorna o estado atualizado da sala. A notificação será montada por quem chamou.
-	return s.criarEstadoDaSala(sala)
+	// CORREÇÃO: Notificação deve ser feita APÓS liberar o lock da sala
+	// para evitar deadlock com locks dos jogadores
+
+	// Notifica após liberar o lock da sala
+	if len(sala.CartasNaMesa) < len(sala.Jogadores) {
+		// Apenas um jogador jogou, notifica aguardando oponente
+		s.notificarAguardandoOponente(sala)
+	}
+
+	return estado
 }
 
 // replicarEstadoParaShadow replica o estado para o servidor Shadow usando o endpoint /game/replicate
@@ -1342,8 +1362,7 @@ func (s *Servidor) resolverJogada(sala *tipos.Sala) {
 	} else {
 		// Em caso de empate, mantém o mesmo jogador
 		log.Printf("[TURNO:%s] Empate na jogada. Mantendo turno atual: %s", sala.ID, sala.TurnoDe)
-		// Notifica que é a vez do mesmo jogador
-		s.notificarAguardandoOponente(sala)
+		// Notificação será feita pela função chamadora após liberar o lock
 	}
 
 	// Notifica jogadores
@@ -1378,7 +1397,9 @@ func compararCartas(c1, c2 Carta) int {
 // notificarAguardandoOponente notifica que está aguardando o oponente jogar
 func (s *Servidor) notificarAguardandoOponente(sala *tipos.Sala) {
 	// IMPORTANTE: Esta função assume que o `sala.Mutex` JÁ ESTÁ BLOQUEADO pela função que a chamou.
-	log.Printf("[NOTIFICACAO:%s] Publicando atualização de aguardo de jogada.", sala.ID)
+	timestamp := time.Now().Format("15:04:05.000")
+	log.Printf("[%s][NOTIFICACAO:%s] === INÍCIO NOTIFICAÇÃO AGUARDANDO OPONENTE ===", timestamp, sala.ID)
+	log.Printf("[%s][NOTIFICACAO:%s] Publicando atualização de aguardo de jogada.", timestamp, sala.ID)
 
 	// Encontra o nome do jogador que deve jogar
 	var proximoJogadorNome string
@@ -1408,7 +1429,10 @@ func (s *Servidor) notificarAguardandoOponente(sala *tipos.Sala) {
 		}),
 	}
 
+	log.Printf("[%s][NOTIFICACAO:%s] Enviando mensagem para tópico partidas/%s/eventos", timestamp, sala.ID, sala.ID)
+	log.Printf("[%s][NOTIFICACAO:%s] Conteúdo da mensagem: %+v", timestamp, sala.ID, msg)
 	s.publicarEventoPartida(sala.ID, msg)
+	log.Printf("[%s][NOTIFICACAO:%s] === FIM NOTIFICAÇÃO AGUARDANDO OPONENTE ===", timestamp, sala.ID)
 }
 
 // notificarResultadoJogada notifica o resultado de uma jogada
@@ -1704,8 +1728,8 @@ func (s *Servidor) mudarTurnoAtomicamente(sala *tipos.Sala, novoJogadorID string
 	sala.TurnoDe = novoJogadorID
 	log.Printf("[TURNO_ATOMICO:%s] Turno alterado para: %s (%s)", sala.ID, novoJogadorNome, novoJogadorID)
 
-	// Notifica imediatamente
-	s.notificarAguardandoOponente(sala)
+	// CORREÇÃO: Notificação deve ser feita FORA do lock da sala para evitar deadlock
+	// A notificação será feita pela função chamadora após liberar o lock
 }
 
 // A estrutura Servidor agora implementa implicitamente a api.ServidorInterface
