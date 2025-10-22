@@ -1244,10 +1244,11 @@ func (s *Servidor) processarJogadaComoHost(sala *tipos.Sala, clienteID, cartaID 
 		s.resolverJogada(sala) // Esta função determinará o vencedor e o próximo a jogar
 	} else {
 		// Apenas um jogador jogou, passa o turno para o outro.
+		// CORREÇÃO: Usar função atômica para mudança de turno
 		for _, jogador := range sala.Jogadores {
 			if jogador.ID != clienteID {
-				sala.TurnoDe = jogador.ID
 				log.Printf("[TURNO:%s] Jogador %s jogou. Próximo a jogar: %s (%s)", sala.ID, clienteID, jogador.Nome, jogador.ID)
+				s.mudarTurnoAtomicamente(sala, jogador.ID)
 				break
 			}
 		}
@@ -1334,6 +1335,17 @@ func (s *Servidor) resolverJogada(sala *tipos.Sala) {
 	// Limpa a mesa
 	sala.CartasNaMesa = make(map[string]Carta)
 
+	// CORREÇÃO: Define o próximo turno baseado no vencedor da jogada
+	if vencedor != nil {
+		log.Printf("[TURNO:%s] Vencedor da jogada: %s. Próximo turno: %s", sala.ID, vencedorJogada, vencedor.Nome)
+		s.mudarTurnoAtomicamente(sala, vencedor.ID)
+	} else {
+		// Em caso de empate, mantém o mesmo jogador
+		log.Printf("[TURNO:%s] Empate na jogada. Mantendo turno atual: %s", sala.ID, sala.TurnoDe)
+		// Notifica que é a vez do mesmo jogador
+		s.notificarAguardandoOponente(sala)
+	}
+
 	// Notifica jogadores
 	s.notificarResultadoJogada(sala, vencedorJogada)
 
@@ -1377,11 +1389,20 @@ func (s *Servidor) notificarAguardandoOponente(sala *tipos.Sala) {
 		}
 	}
 
+	// CORREÇÃO: Criar contagem de cartas atualizada
+	contagemCartas := make(map[string]int)
+	for _, j := range sala.Jogadores {
+		j.Mutex.Lock()
+		contagemCartas[j.Nome] = len(j.Inventario)
+		j.Mutex.Unlock()
+	}
+
 	msg := protocolo.Mensagem{
 		Comando: "ATUALIZACAO_JOGO",
 		Dados: seguranca.MustJSON(protocolo.DadosAtualizacaoJogo{
 			MensagemDoTurno: fmt.Sprintf("Aguardando jogada de %s...", proximoJogadorNome),
 			NumeroRodada:    sala.NumeroRodada,
+			ContagemCartas:  contagemCartas,
 			UltimaJogada:    sala.CartasNaMesa,
 			TurnoDe:         sala.TurnoDe,
 		}),
@@ -1404,11 +1425,20 @@ func (s *Servidor) notificarResultadoJogada(sala *tipos.Sala, vencedorJogada str
 		j.Mutex.Unlock()
 	}
 
+	// CORREÇÃO: Encontra o nome do próximo jogador para a mensagem
+	var proximoJogadorNome string
+	for _, j := range sala.Jogadores {
+		if j.ID == sala.TurnoDe {
+			proximoJogadorNome = j.Nome
+			break
+		}
+	}
+
 	// Cria a mensagem base
 	msg := protocolo.Mensagem{
 		Comando: "ATUALIZACAO_JOGO",
 		Dados: seguranca.MustJSON(protocolo.DadosAtualizacaoJogo{
-			MensagemDoTurno: fmt.Sprintf("Vencedor da jogada: %s. Próximo a jogar: %s", vencedorJogada, sala.TurnoDe),
+			MensagemDoTurno: fmt.Sprintf("Vencedor da jogada: %s. Próximo a jogar: %s", vencedorJogada, proximoJogadorNome),
 			NumeroRodada:    sala.NumeroRodada,
 			ContagemCartas:  contagemCartas,
 			UltimaJogada:    sala.CartasNaMesa,
@@ -1657,6 +1687,25 @@ func (s *Servidor) notificarErroPartida(clienteID, mensagem, salaID string) {
 func mustJSON(v interface{}) []byte {
 	b, _ := json.Marshal(v)
 	return b
+}
+
+// CORREÇÃO: Função auxiliar para mudança atômica de turno
+func (s *Servidor) mudarTurnoAtomicamente(sala *tipos.Sala, novoJogadorID string) {
+	// Encontra o nome do novo jogador
+	var novoJogadorNome string
+	for _, j := range sala.Jogadores {
+		if j.ID == novoJogadorID {
+			novoJogadorNome = j.Nome
+			break
+		}
+	}
+
+	// Atualiza o turno
+	sala.TurnoDe = novoJogadorID
+	log.Printf("[TURNO_ATOMICO:%s] Turno alterado para: %s (%s)", sala.ID, novoJogadorNome, novoJogadorID)
+
+	// Notifica imediatamente
+	s.notificarAguardandoOponente(sala)
 }
 
 // A estrutura Servidor agora implementa implicitamente a api.ServidorInterface
