@@ -305,6 +305,14 @@ func handleEventoPartida(client mqtt.Client, msg mqtt.Message) {
 			turnoDeQuem = dados.TurnoDe
 		}
 
+		// --- INÍCIO DA CORREÇÃO ---
+		// Verifica se eu joguei uma carta nesta atualização
+		if cartaJogada, euJoguei := dados.UltimaJogada[meuNome]; euJoguei {
+			// Se sim, remove a carta do inventário local
+			removerCartaDoInventario(cartaJogada.ID)
+		}
+		// --- FIM DA CORREÇÃO ---
+
 		fmt.Printf("\n--- RODADA %d ---\n", dados.NumeroRodada)
 		fmt.Println(dados.MensagemDoTurno)
 
@@ -485,6 +493,23 @@ func jogarCarta(cartaID string) {
 
 	fmt.Printf("[INFO] Jogando carta: %s\n", cartaNome)
 }
+
+// --- INÍCIO DA NOVA FUNÇÃO ---
+// removerCartaDoInventario remove uma carta do slice meuInventario pelo ID.
+func removerCartaDoInventario(cartaID string) {
+	novoInventario := []protocolo.Carta{}
+	removida := false
+	for _, c := range meuInventario {
+		if c.ID == cartaID && !removida {
+			removida = true // Garante que apenas uma carta seja removida se houver duplicatas (embora IDs devam ser únicos)
+		} else {
+			novoInventario = append(novoInventario, c)
+		}
+	}
+	meuInventario = novoInventario
+}
+
+// --- FIM DA NOVA FUNÇÃO ---
 
 func enviarChat(texto string) {
 	if salaAtual == "" {
