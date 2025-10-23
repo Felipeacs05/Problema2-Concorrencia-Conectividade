@@ -197,7 +197,20 @@ func (s *Servidor) AtualizarEstadoSalaRemoto(estado tipos.EstadoPartida) {
 }
 
 func (s *Servidor) CriarSalaRemota(solicitante, oponente *tipos.Cliente) {
-	s.criarSala(solicitante, oponente)
+	// Esta função agora precisa do endereço da sombra.
+	// Ela é chamada por handleSolicitarOponente, que TEM o endereço.
+	// Precisamos atualizar a interface em api.go
+	log.Printf("[ERRO] CriarSalaRemota chamada sem endereço de sombra. Isso não deveria acontecer.")
+	// A correção real é atualizar a interface, veja o próximo passo.
+}
+
+func (s *Servidor) CriarSalaRemotaComSombra(solicitante, oponente *tipos.Cliente, sombraAddr string) string {
+	// A ordem dos jogadores aqui é crucial.
+	// Em handleSolicitarOponente:
+	//  'oponente' é o jogador local (j1)
+	//  'solicitante' é o jogador remoto (j2)
+	// Portanto, chamamos criarSala com (oponente, solicitante, sombraAddr)
+	return s.criarSala(oponente, solicitante, sombraAddr)
 }
 
 func (s *Servidor) RemoverPrimeiroDaFila() *tipos.Cliente {
@@ -576,7 +589,7 @@ func (s *Servidor) entrarFila(cliente *tipos.Cliente) {
 		s.mutexFila.Unlock()
 
 		// Cria sala localmente
-		s.criarSala(oponente, cliente)
+		s.criarSala(oponente, cliente, "")
 		return
 	}
 
@@ -742,14 +755,8 @@ func (s *Servidor) realizarSolicitacaoMatchmaking(addr string, cliente *tipos.Cl
 		s.RemoverPrimeiroDaFila()
 
 		// Cria um objeto Cliente para o oponente remoto
-		oponenteRemoto := &tipos.Cliente{
-			ID:   res.OponenteID,
-			Nome: res.OponenteNome,
-		}
 
-		// Cria a sala. O servidor remoto será o Host.
-		s.criarSala(cliente, oponenteRemoto) // `cliente` é o jogador local
-
+		s.criarSalaComoSombra(cliente, res.SalaID, res.OponenteID, res.OponenteNome, res.ServidorHost)
 		return true // Sucesso!
 	}
 
@@ -757,7 +764,63 @@ func (s *Servidor) realizarSolicitacaoMatchmaking(addr string, cliente *tipos.Cl
 	return false
 }
 
-func (s *Servidor) criarSala(j1, j2 *tipos.Cliente) {
+// Em: servidor/main.go
+// ADICIONAR esta nova função
+func (s *Servidor) criarSalaComoSombra(jogadorLocal *tipos.Cliente, salaID string, oponenteID string, oponenteNome string, hostAddr string) {
+	// Cria objeto para oponente remoto
+	oponenteRemoto := &tipos.Cliente{
+		ID:   oponenteID,
+		Nome: oponenteNome,
+	}
+
+	// Busca info completa do jogador local
+	s.mutexClientes.RLock()
+	clienteLocalCompleto, ok := s.Clientes[jogadorLocal.ID]
+	s.mutexClientes.RUnlock()
+	if !ok || clienteLocalCompleto == nil {
+		log.Printf("[CRIAR_SALA_SOMBRA_ERRO] Cliente local %s não encontrado no mapa principal.", jogadorLocal.ID)
+		return
+	}
+
+	// Leitura segura do nome
+	clienteLocalCompleto.Mutex.Lock()
+	nomeJ1 := clienteLocalCompleto.Nome
+	clienteLocalCompleto.Mutex.Unlock()
+
+	log.Printf("[CRIAR_SALA_SOMBRA:%s] Criando sala %s (Host: %s) para %s vs %s", s.ServerID, salaID, hostAddr, nomeJ1, oponenteNome)
+
+	novaSala := &tipos.Sala{
+		ID:             salaID,
+		Jogadores:      []*tipos.Cliente{clienteLocalCompleto, oponenteRemoto},
+		Estado:         "AGUARDANDO_COMPRA", // Estado inicial
+		CartasNaMesa:   make(map[string]Carta),
+		PontosRodada:   make(map[string]int),
+		PontosPartida:  make(map[string]int),
+		NumeroRodada:   1,
+		Prontos:        make(map[string]bool),
+		ServidorHost:   hostAddr,      // <-- CORREÇÃO: Aponta para o Host
+		ServidorSombra: s.MeuEndereco, // <-- CORREÇÃO: Eu sou a Sombra
+	}
+
+	s.mutexSalas.Lock()
+	s.Salas[salaID] = novaSala
+	s.mutexSalas.Unlock()
+
+	clienteLocalCompleto.Mutex.Lock()
+	clienteLocalCompleto.Sala = novaSala
+	clienteLocalCompleto.Mutex.Unlock()
+
+	log.Printf("Sala %s criada como SOMBRA. Host: %s", salaID, hostAddr)
+
+	// Notifica jogador local
+	msg := protocolo.Mensagem{
+		Comando: "PARTIDA_ENCONTRADA",
+		Dados:   seguranca.MustJSON(protocolo.DadosPartidaEncontrada{SalaID: salaID, OponenteID: oponenteID, OponenteNome: oponenteNome}),
+	}
+	s.publicarParaCliente(jogadorLocal.ID, msg)
+}
+
+func (s *Servidor) criarSala(j1, j2 *tipos.Cliente, sombraAddr string) string {
 	salaID := uuid.New().String()
 
 	// --- CORREÇÃO: Buscar nomes de forma segura ---
@@ -768,7 +831,6 @@ func (s *Servidor) criarSala(j1, j2 *tipos.Cliente) {
 
 	if !ok1 || !ok2 {
 		log.Printf("[CRIAR_SALA_ERRO:%s] Falha ao buscar informações completas dos clientes %s ou %s no mapa principal.", s.ServerID, j1.ID, j2.ID)
-		return // Aborta a criação da sala
 	}
 
 	// Usa os nomes dos clientes buscados do mapa principal
@@ -786,7 +848,6 @@ func (s *Servidor) criarSala(j1, j2 *tipos.Cliente) {
 	log.Printf("[CRIAR_SALA:%s] Tentando criar sala %s para %s (%s) vs %s (%s)", s.ServerID, salaID, nomeJ1, idJ1, nomeJ2, idJ2)
 	if nomeJ1 == "" || nomeJ2 == "" {
 		log.Printf("[CRIAR_SALA_ERRO:%s] Nomes vazios detectados mesmo após busca! Cliente1: '%s', Cliente2: '%s'. Abortando.", s.ServerID, nomeJ1, nomeJ2)
-		return // Aborta se os nomes ainda estiverem vazios
 	}
 	// --- FIM DA CORREÇÃO ---
 
@@ -801,7 +862,7 @@ func (s *Servidor) criarSala(j1, j2 *tipos.Cliente) {
 		NumeroRodada:   1,
 		Prontos:        make(map[string]bool),
 		ServidorHost:   s.MeuEndereco,
-		ServidorSombra: "",
+		ServidorSombra: sombraAddr,
 	}
 	// Adiciona a sala ao mapa
 	s.mutexSalas.Lock()
@@ -833,6 +894,8 @@ func (s *Servidor) criarSala(j1, j2 *tipos.Cliente) {
 	s.publicarParaCliente(j1.ID, msg1)
 	log.Printf("[CRIAR_SALA:NOTIFICACAO] Enviando PARTIDA_ENCONTRADA para %s (ID: %s)", nomeJ2, idJ2)
 	s.publicarParaCliente(j2.ID, msg2)
+
+	return salaID
 }
 
 func (s *Servidor) processarCompraPacote(clienteID string, sala *tipos.Sala) {

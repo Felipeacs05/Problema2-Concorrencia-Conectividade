@@ -241,12 +241,13 @@ func (s *Server) handleSolicitarOponente(c *gin.Context) {
 		}
 
 		// Cria a sala. Servidor local será o Host.
-		s.servidor.CriarSalaRemota(oponente, solicitante)
-
+		salaID := s.servidor.CriarSalaRemotaComSombra(solicitante, oponente, req.ServidorOrigem)
 		// Responde ao servidor de origem com sucesso
 		c.JSON(http.StatusOK, gin.H{
 			"partida_encontrada": true,
-			"oponente_nome":      oponente.Nome, // Retorna o nome do jogador local para o solicitante
+			"sala_id":            salaID,                      // <-- CORREÇÃO: Envia o ID da sala
+			"servidor_host":      s.servidor.GetMeuEndereco(), // <-- CORREÇÃO: Informa quem é o Host
+			"oponente_nome":      oponente.Nome,               // Retorna o nome do jogador local para o solicitante
 			"oponente_id":        oponente.ID,
 		})
 		return
