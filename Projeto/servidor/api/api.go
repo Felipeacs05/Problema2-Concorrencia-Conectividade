@@ -18,6 +18,7 @@ type ServidorInterface interface {
 	GetFilaDeEspera() []*tipos.Cliente
 	GetMeuEndereco() string
 	AtualizarEstadoSalaRemoto(estado tipos.EstadoPartida)
+	CriarSalaRemota(solicitante, oponente *tipos.Cliente)
 	CriarSalaRemotaComSombra(solicitante, oponente *tipos.Cliente, shadowAddr string) string
 	RemoverPrimeiroDaFila() *tipos.Cliente
 	ProcessarComandoRemoto(salaID string, comando protocolo.Mensagem) error
