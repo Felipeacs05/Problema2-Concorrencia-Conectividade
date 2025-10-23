@@ -1,4 +1,4 @@
-#!/bin/bash
+ ..#!/bin/bash
 
 # Script de teste automatizado para comunicação cross-server
 # Testa se jogadores em servidores diferentes podem jogar juntos

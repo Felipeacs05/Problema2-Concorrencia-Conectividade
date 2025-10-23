@@ -508,7 +508,18 @@ func (s *Servidor) handleComandoPartida(client mqtt.Client, msg mqtt.Message) {
 
 		// Se este servidor é o Host, processa diretamente
 		if servidorHost == s.MeuEndereco {
-			s.processarEventoComoHost(sala, clienteID, cartaID)
+			// CORREÇÃO: Construir o objeto GameEventRequest
+			eventoReq := &tipos.GameEventRequest{
+				MatchID:   sala.ID,
+				EventSeq:  sala.EventSeq + 1, // O Host validará
+				EventType: "CARD_PLAYED",
+				PlayerID:  clienteID,
+				Data: map[string]interface{}{
+					"carta_id": cartaID,
+				},
+			}
+			s.processarEventoComoHost(sala, eventoReq) // <-- CHAMADA CORRIGIDA
+
 		} else if servidorSombra == s.MeuEndereco {
 			// Se é a Sombra, encaminha para o Host via API REST
 			s.encaminharJogadaParaHost(sala, clienteID, cartaID)
@@ -1201,7 +1212,10 @@ func (s *Servidor) encaminharJogadaParaHost(sala *tipos.Sala, clienteID, cartaID
 	if err != nil {
 		log.Printf("[FAILOVER] Host %s inacessível: %v. Iniciando promoção da Sombra...", host, err)
 		s.promoverSombraAHost(sala)
-		s.processarEventoComoHost(sala, clienteID, cartaID) // Processa a jogada como o novo Host
+		
+		// CORREÇÃO: Processa o evento 'req' que já foi criado nesta função (na linha 1182)
+		s.processarEventoComoHost(sala, &req) 
+		
 		return
 	}
 	defer resp.Body.Close()
@@ -1313,10 +1327,17 @@ func (s *Servidor) processarEventoComoHost(sala *tipos.Sala, evento *tipos.GameE
 	switch evento.EventType {
 
 	case "CARD_PLAYED":
-		// Extrai dados específicos da jogada
-		cartaID, ok := evento.Data["carta_id"].(string)
+		// CORREÇÃO: Primeiro, faça a asserção de tipo do 'Data' para um map
+		dadosDoEvento, ok := evento.Data.(map[string]interface{})
 		if !ok {
-			log.Printf("[EVENTO_HOST:%s] Evento CARD_PLAYED sem 'carta_id'", sala.ID)
+			log.Printf("[EVENTO_HOST:%s] Evento CARD_PLAYED com 'Data' mal formatado (esperado map[string]interface{}, obteve %T)", sala.ID, evento.Data)
+			return nil
+		}
+
+		// Agora sim, acesse o map 'dadosDoEvento'
+		cartaID, ok := dadosDoEvento["carta_id"].(string)
+		if !ok {
+			log.Printf("[EVENTO_HOST:%s] Evento CARD_PLAYED sem 'carta_id' no 'Data'", sala.ID)
 			return nil
 		}
 
@@ -1366,9 +1387,17 @@ func (s *Servidor) processarEventoComoHost(sala *tipos.Sala, evento *tipos.GameE
 		go s.verificarEIniciarPartidaSeProntos(sala)
 
 	case "CHAT":
-		texto, ok := evento.Data["texto"].(string)
+		// CORREÇÃO: Primeiro, faça a asserção de tipo
+		dadosDoEvento, ok := evento.Data.(map[string]interface{})
 		if !ok {
-			log.Printf("[EVENTO_HOST:%s] Evento CHAT sem 'texto'", sala.ID)
+			log.Printf("[EVENTO_HOST:%s] Evento CHAT com 'Data' mal formatado (esperado map[string]interface{}, obteve %T)", sala.ID, evento.Data)
+			return nil
+		}
+
+		// Agora, acesse o map 'dadosDoEvento'
+		texto, ok := dadosDoEvento["texto"].(string)
+		if !ok {
+			log.Printf("[EVENTO_HOST:%s] Evento CHAT sem 'texto' no 'Data'", sala.ID)
 			return nil
 		}
 		log.Printf("[HOST-CHAT] Recebido evento de chat de %s. Fazendo broadcast.", nomeJogador)
