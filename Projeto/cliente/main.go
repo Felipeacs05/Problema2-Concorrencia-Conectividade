@@ -381,7 +381,7 @@ func handleEventoPartida(client mqtt.Client, msg mqtt.Message) {
 			Texto       string `json:"texto"`
 		}
 		if err := json.Unmarshal(mensagem.Dados, &dados); err == nil {
-			// Não exibe a própria mensagem de chat
+			// Não exibe a própria mensagem de chat que o jogador enviou
 			if dados.NomeJogador != meuNome {
 				fmt.Printf("\r[%s]: %s\n> ", dados.NomeJogador, dados.Texto)
 			}

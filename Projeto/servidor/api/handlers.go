@@ -268,7 +268,42 @@ func (s *Server) handleGameStart(c *gin.Context) {
 }
 
 func (s *Server) handleGameEvent(c *gin.Context) {
-	// ... (código a ser movido)
+	var req tipos.GameEventRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Payload inválido"})
+		return
+	}
+
+	// Valida assinatura
+	event := tipos.GameEvent{
+		EventSeq:  req.EventSeq,
+		MatchID:   req.MatchID,
+		EventType: req.EventType,
+		PlayerID:  req.PlayerID,
+		Signature: req.Signature,
+	}
+	if !seguranca.VerifyEventSignature(&event) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Assinatura inválida"})
+		return
+	}
+
+	// Busca a sala usando método da interface
+	salas := s.servidor.GetSalas()
+	sala, ok := salas[req.MatchID]
+
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Sala não encontrada"})
+		return
+	}
+
+	// Processa o evento como Host
+	estado := s.servidor.ProcessarEventoComoHost(sala, &req)
+	if estado == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Evento rejeitado"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "evento_processado"})
 }
 
 func (s *Server) handleGameReplicate(c *gin.Context) {

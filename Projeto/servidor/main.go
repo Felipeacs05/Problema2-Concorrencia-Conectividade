@@ -545,22 +545,14 @@ func (s *Servidor) handleComandoPartida(client mqtt.Client, msg mqtt.Message) {
 		if cliente == nil {
 			return
 		}
-		cliente.Mutex.Lock()
-		nomeJogador := cliente.Nome
-		cliente.Mutex.Unlock()
-
-		if nomeJogador == "" {
-			log.Printf("[CHAT_ERRO] Nome do jogador para cliente %s não encontrado.", dadosCliente.ClienteID)
-			return
-		}
 
 		if servidorHost == s.MeuEndereco {
 			// Eu sou o Host, eu faço o broadcast
-			log.Printf("[HOST-CHAT] Recebido chat de %s. Fazendo broadcast.", nomeJogador)
-			s.broadcastChat(sala, dadosCliente.Texto, nomeJogador)
+			log.Printf("[HOST-CHAT] Recebido chat de %s. Fazendo broadcast.", cliente.Nome)
+			s.retransmitirChat(sala, cliente, dadosCliente.Texto)
 		} else if servidorSombra == s.MeuEndereco {
 			// Eu sou o Shadow, encaminho para o Host
-			log.Printf("[SHADOW-CHAT] Recebido chat de %s. Encaminhando para Host %s.", nomeJogador, servidorHost)
+			log.Printf("[SHADOW-CHAT] Recebido chat de %s. Encaminhando para Host %s.", cliente.Nome, servidorHost)
 			dadosEvento := map[string]interface{}{
 				"texto": dadosCliente.Texto,
 			}
@@ -990,46 +982,8 @@ func (s *Servidor) CriarSalaCrossServer(matchID string, players []tipos.Player, 
 	return matchID
 }
 
-func (s *Servidor) ProcessarEventoComoHost(matchID string, eventSeq int64, eventType, playerID string, data map[string]interface{}) bool {
-	s.mutexSalas.Lock()
-	sala, ok := s.Salas[matchID]
-	s.mutexSalas.Unlock()
-
-	if !ok {
-		log.Printf("[PROCESSAR_EVENTO] Sala %s não encontrada", matchID)
-		return false
-	}
-
-	sala.Mutex.Lock()
-	defer sala.Mutex.Unlock()
-
-	// Valida eventSeq
-	if eventSeq <= sala.EventSeq {
-		log.Printf("[PROCESSAR_EVENTO] EventSeq %d é menor ou igual ao atual %d", eventSeq, sala.EventSeq)
-		return false
-	}
-
-	// Atualiza eventSeq
-	sala.EventSeq = eventSeq
-
-	// Processa evento baseado no tipo
-	switch eventType {
-	case "CARD_PLAYED":
-		// CORREÇÃO: Cria evento e processa
-		evento := &tipos.GameEventRequest{
-			MatchID:   matchID,
-			EventSeq:  eventSeq,
-			EventType: eventType,
-			PlayerID:  playerID,
-			Data:      data,
-		}
-		s.processarEventoComoHost(sala, evento)
-	case "PACKAGE_PURCHASED":
-		// Processa compra de pacote
-		log.Printf("[PROCESSAR_EVENTO] Processando compra de pacote para %s", playerID)
-	}
-
-	return true
+func (s *Servidor) ProcessarEventoComoHost(sala *tipos.Sala, evento *tipos.GameEventRequest) *tipos.EstadoPartida {
+	return s.processarEventoComoHost(sala, evento)
 }
 
 func (s *Servidor) ReplicarEstadoComoShadow(matchID string, eventSeq int64, state tipos.EstadoPartida) bool {
@@ -1439,18 +1393,43 @@ func (s *Servidor) processarEventoComoHost(sala *tipos.Sala, evento *tipos.GameE
 	// --- LÓGICA DE CADA EVENTO ---
 	switch evento.EventType {
 
-	case "CARD_PLAYED":
+	case "PLAYER_READY":
+		sala.Prontos[nomeJogador] = true
+		log.Printf("[HOST] Jogador %s (%s) está PRONTO (evento recebido). Prontos: %d/%d", nomeJogador, evento.PlayerID, len(sala.Prontos), len(sala.Jogadores))
+		// Esta verificação é crucial para iniciar a partida quando o jogador remoto (do Shadow) fica pronto.
+		go s.verificarEIniciarPartidaSeProntos(sala)
+
+	case "CHAT":
+		// CORREÇÃO: Primeiro, faça a asserção de tipo
+		dadosDoEvento, ok := evento.Data.(map[string]interface{})
+		if !ok {
+			log.Printf("[EVENTO_HOST:%s] Evento CHAT com 'Data' mal formatado (esperado map[string]interface{}, obteve %T)", sala.ID, evento.Data)
+			return nil
+		}
+
+		// Agora, acesse o map 'dadosDoEvento'
+		texto, ok := dadosDoEvento["texto"].(string)
+		if !ok {
+			log.Printf("[EVENTO_HOST:%s] Evento CHAT sem 'texto' no 'Data'", sala.ID)
+			return nil
+		}
+		log.Printf("[HOST-CHAT] Recebido evento de chat de %s. Fazendo broadcast.", nomeJogador)
+		// Usamos goroutine para liberar o lock da sala rapidamente
+		// (A função broadcastChat deve ser atualizada para publicar no MQTT da partida)
+		go s.retransmitirChat(sala, jogador, texto)
+
+	case "JOGAR_CARTA":
 		// CORREÇÃO: Primeiro, faça a asserção de tipo do 'Data' para um map
 		dadosDoEvento, ok := evento.Data.(map[string]interface{})
 		if !ok {
-			log.Printf("[EVENTO_HOST:%s] Evento CARD_PLAYED com 'Data' mal formatado (esperado map[string]interface{}, obteve %T)", sala.ID, evento.Data)
+			log.Printf("[EVENTO_HOST:%s] Evento JOGAR_CARTA com 'Data' mal formatado (esperado map[string]interface{}, obteve %T)", sala.ID, evento.Data)
 			return nil
 		}
 
 		// Agora sim, acesse o map 'dadosDoEvento'
 		cartaID, ok := dadosDoEvento["carta_id"].(string)
 		if !ok {
-			log.Printf("[EVENTO_HOST:%s] Evento CARD_PLAYED sem 'carta_id' no 'Data'", sala.ID)
+			log.Printf("[EVENTO_HOST:%s] Evento JOGAR_CARTA sem 'carta_id' no 'Data'", sala.ID)
 			return nil
 		}
 
@@ -1492,31 +1471,6 @@ func (s *Servidor) processarEventoComoHost(sala *tipos.Sala, evento *tipos.GameE
 			}
 			s.notificarAguardandoOponente(sala) // Notifica que a jogada foi feita, mas espera o outro
 		}
-
-	case "PLAYER_READY":
-		sala.Prontos[nomeJogador] = true
-		log.Printf("[HOST] Jogador %s (%s) está PRONTO (evento recebido). Prontos: %d/%d", nomeJogador, evento.PlayerID, len(sala.Prontos), len(sala.Jogadores))
-		// Usamos goroutine para liberar o lock da sala rapidamente
-		go s.verificarEIniciarPartidaSeProntos(sala)
-
-	case "CHAT":
-		// CORREÇÃO: Primeiro, faça a asserção de tipo
-		dadosDoEvento, ok := evento.Data.(map[string]interface{})
-		if !ok {
-			log.Printf("[EVENTO_HOST:%s] Evento CHAT com 'Data' mal formatado (esperado map[string]interface{}, obteve %T)", sala.ID, evento.Data)
-			return nil
-		}
-
-		// Agora, acesse o map 'dadosDoEvento'
-		texto, ok := dadosDoEvento["texto"].(string)
-		if !ok {
-			log.Printf("[EVENTO_HOST:%s] Evento CHAT sem 'texto' no 'Data'", sala.ID)
-			return nil
-		}
-		log.Printf("[HOST-CHAT] Recebido evento de chat de %s. Fazendo broadcast.", nomeJogador)
-		// Usamos goroutine para liberar o lock da sala rapidamente
-		// (A função broadcastChat deve ser atualizada para publicar no MQTT da partida)
-		go s.broadcastChat(sala, texto, nomeJogador)
 
 	} // Fim do switch
 
@@ -2186,7 +2140,16 @@ func (s *Servidor) processarComandoMQTT(topic string, payload []byte) {
 	// Se este servidor NÃO for o host, encaminha o comando
 	if !isHost && isCrossServer {
 		log.Printf("[%s][COMANDO_DEBUG] SHADOW: Encaminhando comando '%s' do cliente %s para o Host %s", timestamp, mensagem.Comando, clienteID, sala.ServidorHost)
-		s.encaminharEventoParaHost(sala, clienteID, mensagem.Comando, map[string]interface{}{"comando": mensagem.Dados})
+
+		// CORREÇÃO: Decodifica o payload para um mapa genérico para encaminhar os dados corretamente,
+		// em vez de aninhá-los em um novo mapa.
+		var dataParaEncaminhar map[string]interface{}
+		if err := json.Unmarshal(mensagem.Dados, &dataParaEncaminhar); err != nil {
+			log.Printf("[SHADOW] Erro ao decodificar dados do evento '%s' para encaminhamento: %v", mensagem.Comando, err)
+			return
+		}
+
+		s.encaminharEventoParaHost(sala, clienteID, mensagem.Comando, dataParaEncaminhar)
 		return
 	}
 
@@ -2202,7 +2165,7 @@ func (s *Servidor) processarComandoMQTT(topic string, payload []byte) {
 		if err := json.Unmarshal(mensagem.Dados, &dadosJogada); err == nil {
 			evento := &tipos.GameEventRequest{
 				MatchID:   sala.ID,
-				EventType: "CARD_PLAYED",
+				EventType: "JOGAR_CARTA",
 				PlayerID:  clienteID,
 				Data:      map[string]interface{}{"carta_id": dadosJogada.CartaID},
 			}

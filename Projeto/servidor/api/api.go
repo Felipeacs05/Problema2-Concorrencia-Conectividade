@@ -23,6 +23,8 @@ type ServidorInterface interface {
 	RemoverPrimeiroDaFila() *tipos.Cliente
 	ProcessarComandoRemoto(salaID string, comando protocolo.Mensagem) error
 	PublicarChatRemoto(salaID, nomeJogador, texto string) // Adicionado para chat cross-server
+	GetSalas() map[string]*tipos.Sala
+	ProcessarEventoComoHost(sala *tipos.Sala, evento *tipos.GameEventRequest) *tipos.EstadoPartida
 }
 
 type Server struct {
