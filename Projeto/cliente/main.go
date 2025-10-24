@@ -286,14 +286,12 @@ func processarMensagemServidor(msg protocolo.Mensagem) {
 func handleEventoPartida(client mqtt.Client, msg mqtt.Message) {
 	var mensagem protocolo.Mensagem
 	if err := json.Unmarshal(msg.Payload(), &mensagem); err != nil {
-		log.Printf("Erro ao decodificar evento da partida: %v", err)
+		log.Printf("[ERRO] Falha ao decodificar mensagem da partida: %v", err)
 		return
 	}
-
-	// --- ADICIONE ESTE LOG PARA DEPURAR ---
+	// Adicionado para depuração
 	log.Printf("[DEBUG] Mensagem MQTT recebida no tópico da partida: %s", msg.Topic())
 	log.Printf("[DEBUG] Mensagem decodificada: %+v", mensagem)
-	// --- FIM DA ADIÇÃO ---
 
 	switch mensagem.Comando {
 	case "ATUALIZACAO_JOGO":
@@ -377,6 +375,17 @@ func handleEventoPartida(client mqtt.Client, msg mqtt.Message) {
 		}
 		fmt.Printf("\n💬 %s: %s\n> ", prefixo, dados.Texto)
 
+	case "CHAT_RECEBIDO":
+		var dados struct {
+			NomeJogador string `json:"nomeJogador"`
+			Texto       string `json:"texto"`
+		}
+		if err := json.Unmarshal(mensagem.Dados, &dados); err == nil {
+			// Não exibe a própria mensagem de chat
+			if dados.NomeJogador != meuNome {
+				fmt.Printf("\r[%s]: %s\n> ", dados.NomeJogador, dados.Texto)
+			}
+		}
 	default: // Adiciona um caso default para debugging
 		log.Printf("[DEBUG] Comando de partida não reconhecido: %s", mensagem.Comando)
 		fmt.Print("> ") // Garante que o prompt aparece

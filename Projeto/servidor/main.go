@@ -2051,3 +2051,172 @@ func (s *Servidor) EncaminharParaLider(c *gin.Context) {
 func (s *Servidor) FormarPacote() ([]tipos.Carta, error) {
 	return s.Store.FormarPacote(PACOTE_SIZE), nil
 }
+
+// PublicarChatRemoto é chamado pela API quando o Shadow recebe um chat do Host
+func (s *Servidor) PublicarChatRemoto(salaID, nomeJogador, texto string) {
+	dadosChat := gin.H{
+		"nomeJogador": nomeJogador,
+		"texto":       texto,
+	}
+	msg := protocolo.Mensagem{
+		Comando: "CHAT_RECEBIDO",
+		Dados:   seguranca.MustJSON(dadosChat),
+	}
+	s.publicarEventoPartida(salaID, msg)
+}
+
+// retransmitirChat envia uma mensagem de chat para todos os jogadores na sala.
+func (s *Servidor) retransmitirChat(sala *tipos.Sala, cliente *tipos.Cliente, texto string) {
+	isHost := sala.ServidorHost == s.MeuEndereco
+	isCrossServer := sala.ServidorSombra != ""
+
+	// Log detalhado
+	log.Printf("[CHAT:%s] Retransmitindo de '%s'. Host: %t, Cross-Server: %t", sala.ID, cliente.Nome, isHost, isCrossServer)
+
+	// Monta a mensagem de chat
+	dadosChat := gin.H{
+		"nomeJogador": cliente.Nome,
+		"texto":       texto,
+	}
+	msg := protocolo.Mensagem{
+		Comando: "CHAT_RECEBIDO",
+		Dados:   seguranca.MustJSON(dadosChat),
+	}
+
+	// 1. O servidor sempre publica em seu broker local.
+	// Em partidas locais, isso notifica ambos.
+	// Em partidas cross-server, isso notifica o jogador local.
+	s.publicarEventoPartida(sala.ID, msg)
+	log.Printf("[CHAT:%s] Publicado localmente via MQTT.", sala.ID)
+
+	// 2. Se for o Host de uma partida cross-server, encaminha para o Shadow.
+	if isHost && isCrossServer {
+		go s.encaminharChatParaSombra(sala.ServidorSombra, sala.ID, cliente.Nome, texto)
+	}
+}
+
+// encaminharChatParaSombra envia a mensagem de chat para o servidor Sombra via REST.
+func (s *Servidor) encaminharChatParaSombra(sombraAddr, salaID, nomeJogador, texto string) {
+	log.Printf("[CHAT-TX:%s] Encaminhando chat para Sombra em %s", salaID, sombraAddr)
+	url := fmt.Sprintf("http://%s/game/chat", sombraAddr)
+	payload, _ := json.Marshal(map[string]string{
+		"sala_id":      salaID,
+		"nome_jogador": nomeJogador,
+		"texto":        texto,
+	})
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(payload))
+	if err != nil {
+		log.Printf("[CHAT-TX:%s] ERRO ao criar requisição para Sombra: %v", salaID, err)
+		return
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+seguranca.GenerateJWT(s.ServerID))
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[CHAT-TX:%s] ERRO ao enviar chat para Sombra: %v", salaID, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		log.Printf("[CHAT-TX:%s] Chat retransmitido para Sombra com sucesso.", salaID)
+	} else {
+		log.Printf("[CHAT-TX:%s] ERRO: Sombra retornou status %d ao retransmitir chat.", salaID, resp.StatusCode)
+	}
+}
+
+func (s *Servidor) processarComandoMQTT(topic string, payload []byte) {
+	// Extrai salaID do tópico, se aplicável
+	parts := strings.Split(topic, "/")
+	if len(parts) < 3 || parts[0] != "partidas" {
+		// log.Printf("[CMD_MQTT_DEBUG] Tópico MQTT ignorado (não é de comando de partida): %s", topic)
+		return
+	}
+	salaID := parts[1]
+
+	var mensagem protocolo.Mensagem
+	if err := json.Unmarshal(payload, &mensagem); err != nil {
+		log.Printf("Erro ao decodificar mensagem MQTT: %v", err)
+		return
+	}
+
+	timestamp := time.Now().Format("15:04:05.000")
+	log.Printf("[%s][COMANDO_DEBUG] === INÍCIO PROCESSAMENTO COMANDO ===", timestamp)
+	log.Printf("[%s][COMANDO_DEBUG] Comando recebido no tópico: %s", timestamp, topic)
+	log.Printf("[%s][COMANDO_DEBUG] Payload: %s", timestamp, string(payload))
+	log.Printf("[%s][COMANDO_DEBUG] Comando decodificado: %s", timestamp, mensagem.Comando)
+
+	s.mutexSalas.RLock()
+	sala, ok := s.Salas[salaID]
+	s.mutexSalas.RUnlock()
+
+	if !ok {
+		log.Printf("[%s][COMANDO_DEBUG] ERRO: Sala %s não encontrada para o comando %s", timestamp, salaID, mensagem.Comando)
+		return
+	}
+
+	// Extrai o clienteID do payload genérico para identificar o remetente
+	var dadosComClienteID struct {
+		ClienteID string `json:"cliente_id"`
+		Texto     string `json:"texto"` // Para o caso de CHAT
+	}
+	if err := json.Unmarshal(mensagem.Dados, &dadosComClienteID); err != nil {
+		log.Printf("[%s][COMANDO_DEBUG] ERRO: Falha ao extrair cliente_id do payload para o comando %s", timestamp, mensagem.Comando)
+		return
+	}
+	clienteID := dadosComClienteID.ClienteID
+
+	s.mutexClientes.RLock()
+	cliente, clienteOk := s.Clientes[clienteID]
+	s.mutexClientes.RUnlock()
+
+	if !clienteOk {
+		log.Printf("[%s][COMANDO_DEBUG] ERRO: Cliente %s não encontrado para o comando %s", timestamp, clienteID, mensagem.Comando)
+		return
+	}
+
+	// Lógica de encaminhamento ou processamento
+	isHost := sala.ServidorHost == s.MeuEndereco
+	isCrossServer := sala.ServidorSombra != ""
+
+	// Se este servidor NÃO for o host, encaminha o comando
+	if !isHost && isCrossServer {
+		log.Printf("[%s][COMANDO_DEBUG] SHADOW: Encaminhando comando '%s' do cliente %s para o Host %s", timestamp, mensagem.Comando, clienteID, sala.ServidorHost)
+		s.encaminharEventoParaHost(sala, clienteID, mensagem.Comando, map[string]interface{}{"comando": mensagem.Dados})
+		return
+	}
+
+	// Se for o Host, processa o comando
+	switch mensagem.Comando {
+	case "COMPRAR_PACOTE":
+		log.Printf("[COMPRAR_DEBUG] Processando compra para cliente %s, souLider: %t", clienteID, s.ClusterManager.SouLider())
+		s.processarCompraPacote(clienteID, sala)
+	case "JOGAR_CARTA":
+		var dadosJogada struct {
+			CartaID string `json:"carta_id"`
+		}
+		if err := json.Unmarshal(mensagem.Dados, &dadosJogada); err == nil {
+			evento := &tipos.GameEventRequest{
+				MatchID:   sala.ID,
+				EventType: "CARD_PLAYED",
+				PlayerID:  clienteID,
+				Data:      map[string]interface{}{"carta_id": dadosJogada.CartaID},
+			}
+			s.processarEventoComoHost(sala, evento)
+		}
+	case "CHAT":
+		log.Printf("[HOST-CHAT] Recebido chat de %s. Fazendo broadcast.", cliente.Nome)
+		s.retransmitirChat(sala, cliente, dadosComClienteID.Texto)
+	default:
+		log.Printf("[%s][COMANDO_DEBUG] AVISO: Comando '%s' não reconhecido ou não manipulado diretamente.", timestamp, mensagem.Comando)
+	}
+	log.Printf("[%s][COMANDO_DEBUG] === FIM PROCESSAMENTO COMANDO ===", timestamp)
+}
+
+func (s *Servidor) processarLogin(payload []byte, tempID string) {
+	// ... existing code ...
+}

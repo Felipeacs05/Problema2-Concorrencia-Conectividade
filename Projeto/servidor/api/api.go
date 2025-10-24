@@ -22,6 +22,7 @@ type ServidorInterface interface {
 	CriarSalaRemotaComSombra(solicitante, oponente *tipos.Cliente, shadowAddr string) string
 	RemoverPrimeiroDaFila() *tipos.Cliente
 	ProcessarComandoRemoto(salaID string, comando protocolo.Mensagem) error
+	PublicarChatRemoto(salaID, nomeJogador, texto string) // Adicionado para chat cross-server
 }
 
 type Server struct {
@@ -73,6 +74,9 @@ func (s *Server) setupRoutes() {
 		matchmaking.POST("/solicitar_oponente", s.handleSolicitarOponente)
 		matchmaking.POST("/confirmar_partida", s.handleConfirmarPartida)
 	}
+
+	// Adiciona rota para encaminhamento de chat
+	s.router.POST("/game/chat", authMiddleware(), s.handleEncaminharChat)
 
 	// Rotas de estoque (protegidas por JWT e requerem liderança)
 	stock := s.router.Group("/estoque", authMiddleware(), s.leaderOnlyMiddleware())

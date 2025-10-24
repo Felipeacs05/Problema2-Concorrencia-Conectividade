@@ -274,3 +274,18 @@ func (s *Server) handleGameEvent(c *gin.Context) {
 func (s *Server) handleGameReplicate(c *gin.Context) {
 	// ... (código a ser movido)
 }
+
+// handleEncaminharChat recebe uma mensagem de chat do Host e a retransmite para o cliente local (usado pelo Shadow)
+func (s *Server) handleEncaminharChat(c *gin.Context) {
+	var req struct {
+		SalaID      string `json:"sala_id"`
+		NomeJogador string `json:"nome_jogador"`
+		Texto       string `json:"texto"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Payload inválido"})
+		return
+	}
+	s.servidor.PublicarChatRemoto(req.SalaID, req.NomeJogador, req.Texto)
+	c.JSON(http.StatusOK, gin.H{"status": "chat_relayed"})
+}
