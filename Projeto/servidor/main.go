@@ -648,26 +648,8 @@ func (s *Servidor) entrarFila(cliente *tipos.Cliente) {
 		Dados:   seguranca.MustJSON(map[string]string{"mensagem": "Procurando oponente em todos os servidores..."}),
 	})
 
-	// Aguarda um pouco antes de iniciar busca global para dar chance de matchmaking local
-	go func() {
-		time.Sleep(2 * time.Second) // Aguarda 2 segundos
-
-		// Verifica se ainda está na fila local antes de iniciar busca global
-		s.mutexFila.Lock()
-		aindaNaFila := false
-		for _, c := range s.FilaDeEspera {
-			if c.ID == cliente.ID {
-				aindaNaFila = true
-				break
-			}
-		}
-		s.mutexFila.Unlock()
-
-		if aindaNaFila {
-			log.Printf("[MATCHMAKING] Iniciando busca global persistente para %s (%s)", cliente.Nome, cliente.ID)
-			s.gerenciarBuscaGlobalPersistente(cliente)
-		}
-	}()
+	// O matchmaking global já é persistente, não precisamos mais do 'go func' aqui
+	// O go s.tentarMatchmakingGlobalPeriodicamente() no 'Run' cuidará disso
 }
 
 // gerenciarBuscaGlobalPersistente tenta encontrar um oponente global periodicamente.
@@ -954,19 +936,150 @@ func (s *Servidor) criarSala(j1 *tipos.Cliente, j2 *tipos.Cliente, sombraAddr st
 	}
 
 	s.publicarParaCliente(j1.ID, msg1) // Notifica o jogador local
-	// A notificação para j2 (remoto) será feita pelo servidor Sombra quando ele criar sua sala.
 	log.Printf("[CRIAR_SALA:NOTIFICACAO] Enviando PARTIDA_ENCONTRADA para JOGADOR LOCAL %s (ID: %s)", nomeJ1, idJ1)
+
+	// CORREÇÃO: Se for uma partida local (sem sombra), notifica o j2 também.
+	if sombraAddr == "" {
+		msg2 := protocolo.Mensagem{
+			Comando: "PARTIDA_ENCONTRADA",
+			Dados:   seguranca.MustJSON(protocolo.DadosPartidaEncontrada{SalaID: salaID, OponenteID: idJ1, OponenteNome: nomeJ1}),
+		}
+		s.publicarParaCliente(j2.ID, msg2)
+		log.Printf("[CRIAR_SALA:NOTIFICACAO] Enviando PARTIDA_ENCONTRADA para JOGADOR LOCAL %s (ID: %s)", nomeJ2, idJ2)
+	}
+
+	// A notificação para j2 (remoto) será feita pelo servidor Sombra quando ele criar sua sala.
+	log.Printf("[CRIAR_SALA:NOTIFICACAO] Enviando PARTIDA_ENCONTRADA para JOGADOR REMOTO %s (ID: %s)", nomeJ2, idJ2)
 
 	// O handler da API (Etapa 5) usará este ID para responder ao Sombra.
 	return salaID
 }
+
+// CORREÇÃO: Funções para comunicação cross-server
+func (s *Servidor) CriarSalaCrossServer(matchID string, players []tipos.Player, hostServer string) string {
+	log.Printf("[CRIAR_SALA_CROSS] Criando sala %s como Host", matchID)
+
+	// Cria sala como Host
+	novaSala := &tipos.Sala{
+		ID:             matchID,
+		Jogadores:      make([]*tipos.Cliente, 0, len(players)),
+		Estado:         "AGUARDANDO_COMPRA",
+		CartasNaMesa:   make(map[string]Carta),
+		PontosRodada:   make(map[string]int),
+		PontosPartida:  make(map[string]int),
+		NumeroRodada:   1,
+		Prontos:        make(map[string]bool),
+		ServidorHost:   s.MeuEndereco,
+		ServidorSombra: "", // Será definido quando Shadow se conectar
+	}
+
+	// Adiciona jogadores à sala
+	for _, player := range players {
+		cliente := &tipos.Cliente{
+			ID:   player.ID,
+			Nome: player.Nome,
+		}
+		novaSala.Jogadores = append(novaSala.Jogadores, cliente)
+	}
+
+	s.mutexSalas.Lock()
+	s.Salas[matchID] = novaSala
+	s.mutexSalas.Unlock()
+
+	log.Printf("[CRIAR_SALA_CROSS] Sala %s criada como Host", matchID)
+	return matchID
+}
+
+func (s *Servidor) ProcessarEventoComoHost(matchID string, eventSeq int64, eventType, playerID string, data map[string]interface{}) bool {
+	s.mutexSalas.Lock()
+	sala, ok := s.Salas[matchID]
+	s.mutexSalas.Unlock()
+
+	if !ok {
+		log.Printf("[PROCESSAR_EVENTO] Sala %s não encontrada", matchID)
+		return false
+	}
+
+	sala.Mutex.Lock()
+	defer sala.Mutex.Unlock()
+
+	// Valida eventSeq
+	if eventSeq <= sala.EventSeq {
+		log.Printf("[PROCESSAR_EVENTO] EventSeq %d é menor ou igual ao atual %d", eventSeq, sala.EventSeq)
+		return false
+	}
+
+	// Atualiza eventSeq
+	sala.EventSeq = eventSeq
+
+	// Processa evento baseado no tipo
+	switch eventType {
+	case "CARD_PLAYED":
+		// CORREÇÃO: Cria evento e processa
+		evento := &tipos.GameEventRequest{
+			MatchID:   matchID,
+			EventSeq:  eventSeq,
+			EventType: eventType,
+			PlayerID:  playerID,
+			Data:      data,
+		}
+		s.processarEventoComoHost(sala, evento)
+	case "PACKAGE_PURCHASED":
+		// Processa compra de pacote
+		log.Printf("[PROCESSAR_EVENTO] Processando compra de pacote para %s", playerID)
+	}
+
+	return true
+}
+
+func (s *Servidor) ReplicarEstadoComoShadow(matchID string, eventSeq int64, state tipos.EstadoPartida) bool {
+	s.mutexSalas.Lock()
+	sala, ok := s.Salas[matchID]
+	s.mutexSalas.Unlock()
+
+	if !ok {
+		// Cria sala como Shadow se não existir
+		log.Printf("[REPLICAR_ESTADO] Criando sala %s como Shadow", matchID)
+		sala = &tipos.Sala{
+			ID:        matchID,
+			Jogadores: make([]*tipos.Cliente, 0),
+		}
+
+		s.mutexSalas.Lock()
+		s.Salas[matchID] = sala
+		s.mutexSalas.Unlock()
+	}
+
+	sala.Mutex.Lock()
+	defer sala.Mutex.Unlock()
+
+	// Valida eventSeq
+	if eventSeq <= sala.EventSeq {
+		log.Printf("[REPLICAR_ESTADO] EventSeq %d é menor ou igual ao atual %d", eventSeq, sala.EventSeq)
+		return false
+	}
+
+	// Atualiza estado
+	sala.Estado = state.Estado
+	sala.CartasNaMesa = state.CartasNaMesa
+	sala.PontosRodada = state.PontosRodada
+	sala.PontosPartida = state.PontosPartida
+	sala.NumeroRodada = state.NumeroRodada
+	sala.Prontos = state.Prontos
+	sala.EventSeq = eventSeq
+
+	log.Printf("[REPLICAR_ESTADO] Estado da sala %s sincronizado (eventSeq: %d)", matchID, eventSeq)
+	return true
+}
+
+// CORREÇÃO: Funções auxiliares para a API (GetMeuEndereco já existe)
 
 // encaminharEventoParaHost envia um evento genérico do Shadow para o Host via API REST
 func (s *Servidor) encaminharEventoParaHost(sala *tipos.Sala, clienteID, eventType string, data map[string]interface{}) {
 	sala.Mutex.Lock()
 	host := sala.ServidorHost
 	// Incremento otimista. O Host validará e definirá o eventSeq final.
-	eventSeq := sala.EventSeq + 1 
+	eventSeq := sala.EventSeq + 1
 	sala.Mutex.Unlock()
 
 	log.Printf("[SHADOW] Encaminhando evento %s de %s para o Host %s (eventSeq: %d)", eventType, clienteID, host, eventSeq)
@@ -1003,7 +1116,7 @@ func (s *Servidor) encaminharEventoParaHost(sala *tipos.Sala, clienteID, eventTy
 	if err != nil {
 		log.Printf("[FAILOVER] Host %s inacessível ao enviar evento %s: %v.", host, eventType, err)
 		// A lógica de failover (promoção) deve ser tratada aqui
-		// s.promoverSombraAHost(sala) 
+		// s.promoverSombraAHost(sala)
 		return
 	}
 	defer resp.Body.Close()
@@ -1212,10 +1325,10 @@ func (s *Servidor) encaminharJogadaParaHost(sala *tipos.Sala, clienteID, cartaID
 	if err != nil {
 		log.Printf("[FAILOVER] Host %s inacessível: %v. Iniciando promoção da Sombra...", host, err)
 		s.promoverSombraAHost(sala)
-		
+
 		// CORREÇÃO: Processa o evento 'req' que já foi criado nesta função (na linha 1182)
-		s.processarEventoComoHost(sala, &req) 
-		
+		s.processarEventoComoHost(sala, &req)
+
 		return
 	}
 	defer resp.Body.Close()
