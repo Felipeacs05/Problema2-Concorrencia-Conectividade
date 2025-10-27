@@ -21,6 +21,8 @@ type ServidorInterface interface {
 	CriarSalaRemota(solicitante, oponente *tipos.Cliente)
 	CriarSalaRemotaComSombra(solicitante, oponente *tipos.Cliente, shadowAddr string) string
 	RemoverPrimeiroDaFila() *tipos.Cliente
+	PublicarParaCliente(clienteID string, msg protocolo.Mensagem)
+	AjustarContagemCartasLocal(clienteID string, msg *protocolo.Mensagem)
 	ProcessarComandoRemoto(salaID string, comando protocolo.Mensagem) error
 	PublicarChatRemoto(salaID, nomeJogador, texto string) // Adicionado para chat cross-server
 	GetSalas() map[string]*tipos.Sala

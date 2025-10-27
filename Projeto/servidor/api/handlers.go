@@ -17,20 +17,23 @@ import (
 func authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token de autorização ausente"})
+		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Cabeçalho de autorização ausente ou mal formatado"})
 			c.Abort()
 			return
 		}
 
 		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+		log.Printf("[AUTH_MIDDLEWARE] Recebido token para validação.")
 		serverID, err := seguranca.ValidateJWT(tokenString) // Usa a função do pacote de segurança
 		if err != nil {
+			log.Printf("[AUTH_MIDDLEWARE] Erro na validação do JWT: %v", err)
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token inválido: " + err.Error()})
 			c.Abort()
 			return
 		}
 
+		log.Printf("[AUTH_MIDDLEWARE] Token validado com sucesso para server_id: %s", serverID)
 		c.Set("server_id", serverID)
 		c.Next()
 	}
@@ -190,7 +193,27 @@ func (s *Server) handleSincronizarEstado(c *gin.Context) {
 }
 
 func (s *Server) handleNotificarJogador(c *gin.Context) {
-	// ... (código a ser movido)
+	var req struct {
+		ClienteID string             `json:"cliente_id"`
+		Mensagem  protocolo.Mensagem `json:"mensagem"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Requisição inválida"})
+		return
+	}
+
+	log.Printf("[NOTIFICACAO-REMOTA_RX] Notificando jogador %s localmente", req.ClienteID)
+
+	// CORREÇÃO: Se for mensagem de ATUALIZACAO_JOGO, ajusta contagem de cartas usando método do servidor
+	if req.Mensagem.Comando == "ATUALIZACAO_JOGO" {
+		s.servidor.AjustarContagemCartasLocal(req.ClienteID, &req.Mensagem)
+	}
+
+	// Publica a mensagem no MQTT local para o cliente
+	s.servidor.PublicarParaCliente(req.ClienteID, req.Mensagem)
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
 func (s *Server) handleIniciarRemoto(c *gin.Context) {

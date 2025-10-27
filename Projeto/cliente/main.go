@@ -278,6 +278,55 @@ func processarMensagemServidor(msg protocolo.Mensagem) {
 			log.Printf("Erro ao decodificar dados do chat: %v", err)
 		}
 
+	case "ATUALIZACAO_JOGO":
+		var dados protocolo.DadosAtualizacaoJogo
+		json.Unmarshal(msg.Dados, &dados)
+
+		// ATUALIZA O ESTADO DO TURNO
+		if dados.TurnoDe != "" {
+			turnoDeQuem = dados.TurnoDe
+		}
+
+		// --- INÍCIO DA CORREÇÃO ---
+		// Verifica se eu joguei uma carta nesta atualização
+		if cartaJogada, euJoguei := dados.UltimaJogada[meuNome]; euJoguei {
+			// Se sim, remove a carta do inventário local
+			removerCartaDoInventario(cartaJogada.ID)
+		}
+		// --- FIM DA CORREÇÃO ---
+
+		fmt.Printf("\n--- RODADA %d ---\n", dados.NumeroRodada)
+		fmt.Println(dados.MensagemDoTurno)
+
+		if len(dados.UltimaJogada) > 0 {
+			fmt.Println("\nCartas na mesa:")
+			for nome, carta := range dados.UltimaJogada {
+				fmt.Printf("  %s: %s %s (Poder: %d)\n", nome, carta.Nome, carta.Naipe, carta.Valor)
+			}
+		}
+
+		if dados.VencedorJogada != "" && dados.VencedorJogada != "EMPATE" {
+			fmt.Printf("\n🏆 Vencedor da jogada: %s\n", dados.VencedorJogada)
+		}
+
+		if dados.VencedorRodada != "" && dados.VencedorRodada != "EMPATE" {
+			fmt.Printf("🎯 Vencedor da rodada: %s\n", dados.VencedorRodada)
+		}
+
+		if len(dados.ContagemCartas) > 0 {
+			fmt.Println("\nCartas restantes:")
+			for nome, qtd := range dados.ContagemCartas {
+				fmt.Printf("  %s: %d cartas\n", nome, qtd)
+			}
+		}
+
+		// Mostra de quem é a vez
+		quemJoga := oponenteNome
+		if turnoDeQuem == meuID {
+			quemJoga = "Você"
+		}
+		fmt.Printf("(Aguardando jogada de %s)\n-------------------\n> ", quemJoga)
+
 	default:
 		fmt.Printf("\n[DEBUG] Comando não reconhecido: %s\n> ", msg.Comando)
 	}

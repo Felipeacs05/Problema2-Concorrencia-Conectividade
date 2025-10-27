@@ -55,16 +55,17 @@ type GameEvent struct {
 
 // EstadoPartida representa o estado completo de uma partida (para replicação)
 type EstadoPartida struct {
-	SalaID        string           `json:"sala_id"`
-	Estado        string           `json:"estado"`
-	CartasNaMesa  map[string]Carta `json:"cartas_na_mesa"`
-	PontosRodada  map[string]int   `json:"pontos_rodada"`
-	PontosPartida map[string]int   `json:"pontos_partida"`
-	NumeroRodada  int              `json:"numero_rodada"`
-	Prontos       map[string]bool  `json:"prontos"`
-	EventSeq      int64            `json:"eventSeq"` // Sequência de eventos
-	EventLog      []GameEvent      `json:"eventLog"` // Log de eventos
-	TurnoDe       string           `json:"turnoDe"`  // ID do jogador que deve jogar
+	SalaID         string           `json:"sala_id"`
+	Estado         string           `json:"estado"`
+	CartasNaMesa   map[string]Carta `json:"cartas_na_mesa"`
+	PontosRodada   map[string]int   `json:"pontos_rodada"`
+	PontosPartida  map[string]int   `json:"pontos_partida"`
+	NumeroRodada   int              `json:"numero_rodada"`
+	Prontos        map[string]bool  `json:"prontos"`
+	EventSeq       int64            `json:"eventSeq"`        // Sequência de eventos
+	EventLog       []GameEvent      `json:"eventLog"`        // Log de eventos
+	TurnoDe        string           `json:"turnoDe"`         // ID do jogador que deve jogar
+	VencedorJogada string           `json:"vencedor_jogada"` // Vencedor da jogada (se houver)
 }
 
 // GameStartRequest representa a requisição para iniciar uma partida

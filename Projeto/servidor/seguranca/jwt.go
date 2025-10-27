@@ -38,7 +38,7 @@ func GenerateJWT(serverID string) string {
 func ValidateJWT(token string) (string, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
-		return "", fmt.Errorf("token inválido")
+		return "", fmt.Errorf("token inválido (formato incorreto, %d partes)", len(parts))
 	}
 
 	message := parts[0] + "." + parts[1]
@@ -50,7 +50,7 @@ func ValidateJWT(token string) (string, error) {
 
 	payloadJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return "", fmt.Errorf("payload inválido")
+		return "", fmt.Errorf("payload inválido (erro base64)")
 	}
 
 	var payload map[string]interface{}
@@ -59,13 +59,16 @@ func ValidateJWT(token string) (string, error) {
 	}
 
 	exp, ok := payload["exp"].(float64)
-	if !ok || time.Now().Unix() > int64(exp) {
-		return "", fmt.Errorf("token expirado")
+	if !ok {
+		return "", fmt.Errorf("claim 'exp' ausente ou com formato inválido")
+	}
+	if time.Now().Unix() > int64(exp) {
+		return "", fmt.Errorf("token expirado (exp: %d, now: %d)", int64(exp), time.Now().Unix())
 	}
 
 	serverID, ok := payload["server_id"].(string)
 	if !ok {
-		return "", fmt.Errorf("server_id ausente")
+		return "", fmt.Errorf("claim 'server_id' ausente ou com formato inválido")
 	}
 
 	return serverID, nil

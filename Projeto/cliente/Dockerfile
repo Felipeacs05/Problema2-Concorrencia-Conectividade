@@ -2,7 +2,7 @@
 FROM golang:1.25-alpine AS builder
 
 # Instala dependências de build
-RUN apk add --no-cache git
+RUN apk update && apk add --no-cache git
 
 WORKDIR /app
 
@@ -17,9 +17,10 @@ COPY . .
 RUN go build -o /cliente ./cliente
 
 # Imagem final
-FROM alpine:latest
+FROM alpine:3.22
 
-RUN apk --no-cache add ca-certificates
+# Atualiza índices de repositórios e instala dependências
+RUN apk update && apk --no-cache add ca-certificates
 
 WORKDIR /root/
 
