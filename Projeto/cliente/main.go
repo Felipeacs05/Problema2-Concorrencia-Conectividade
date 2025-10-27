@@ -34,10 +34,8 @@ func main() {
 	fmt.Print("Digite seu nome: ")
 	scanner.Scan()
 	meuNome = strings.TrimSpace(scanner.Text())
-	fmt.Printf("[DEBUG] Nome lido: '%s' (len=%d)\n", meuNome, len(meuNome))
 	if meuNome == "" {
 		meuNome = "Jogador"
-		fmt.Printf("[DEBUG] Nome vazio, usando padrão: '%s'\n", meuNome)
 	}
 
 	// --- LÓGICA DE ESCOLHA CORRIGIDA ---
@@ -165,7 +163,6 @@ func fazerLogin() error {
 			if token := mqttClient.Subscribe(permanentTopic, 1, handleMensagemServidor); token.Wait() && token.Error() != nil {
 				return fmt.Errorf("falha ao se inscrever no tópico permanente: %v", token.Error())
 			}
-			fmt.Printf("[DEBUG] Inscrito no tópico permanente: %s\n", permanentTopic)
 			return nil
 		}
 		return fmt.Errorf("resposta de login inesperada: %s", resp.Comando)
@@ -186,14 +183,12 @@ func entrarNaFila() {
 var messageChan = make(chan protocolo.Mensagem, 10)
 
 func handleMensagemServidor(client mqtt.Client, msg mqtt.Message) {
-	fmt.Printf("[DEBUG] Mensagem MQTT recebida no tópico: %s\n", msg.Topic())
 	var mensagem protocolo.Mensagem
 	if err := json.Unmarshal(msg.Payload(), &mensagem); err != nil {
 		log.Printf("Erro ao decodificar mensagem: %v", err)
 		return
 	}
 
-	fmt.Printf("[DEBUG] Mensagem decodificada: %s\n", string(msg.Payload()))
 	// Processa a mensagem
 	processarMensagemServidor(mensagem)
 }
@@ -328,19 +323,15 @@ func processarMensagemServidor(msg protocolo.Mensagem) {
 		fmt.Printf("(Aguardando jogada de %s)\n-------------------\n> ", quemJoga)
 
 	default:
-		fmt.Printf("\n[DEBUG] Comando não reconhecido: %s\n> ", msg.Comando)
+		// Comando não reconhecido, ignora
 	}
 }
 
 func handleEventoPartida(client mqtt.Client, msg mqtt.Message) {
 	var mensagem protocolo.Mensagem
 	if err := json.Unmarshal(msg.Payload(), &mensagem); err != nil {
-		log.Printf("[ERRO] Falha ao decodificar mensagem da partida: %v", err)
 		return
 	}
-	// Adicionado para depuração
-	log.Printf("[DEBUG] Mensagem MQTT recebida no tópico da partida: %s", msg.Topic())
-	log.Printf("[DEBUG] Mensagem decodificada: %+v", mensagem)
 
 	switch mensagem.Comando {
 	case "ATUALIZACAO_JOGO":
@@ -483,7 +474,6 @@ func processarComando(entrada string) {
 }
 
 func comprarPacote() {
-	fmt.Printf("[DEBUG] comprarPacote chamada, salaAtual: '%s'\n", salaAtual)
 	if salaAtual == "" {
 		fmt.Println("[ERRO] Você não está em uma partida.")
 		return
@@ -497,13 +487,9 @@ func comprarPacote() {
 
 	payload, _ := json.Marshal(mensagem)
 	topico := fmt.Sprintf("partidas/%s/comandos", salaAtual)
-	fmt.Printf("[DEBUG] Enviando comando para tópico: %s\n", topico)
-	fmt.Printf("[DEBUG] Payload: %s\n", string(payload))
 
 	token := mqttClient.Publish(topico, 0, false, payload)
 	token.Wait()
-
-	fmt.Println("[INFO] Solicitação de compra enviada...")
 }
 
 func jogarCarta(cartaID string) {

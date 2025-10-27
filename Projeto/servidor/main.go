@@ -1949,12 +1949,19 @@ func (s *Servidor) notificarAguardandoOponente(sala *tipos.Sala) {
 		}
 	}
 
-	// Coleta contagem de cartas (cada jogador tem seu próprio lock)
+	// Coleta contagem de cartas do mapa global (inventários atualizados)
 	contagemCartas := make(map[string]int)
 	for _, j := range jogadoresCopy {
-		j.Mutex.Lock()
-		contagemCartas[j.Nome] = len(j.Inventario)
-		j.Mutex.Unlock()
+		// Busca o jogador no mapa global para obter inventário atualizado
+		s.mutexClientes.RLock()
+		jogadorAtualizado := s.Clientes[j.ID]
+		s.mutexClientes.RUnlock()
+
+		if jogadorAtualizado != nil {
+			jogadorAtualizado.Mutex.Lock()
+			contagemCartas[j.Nome] = len(jogadorAtualizado.Inventario)
+			jogadorAtualizado.Mutex.Unlock()
+		}
 	}
 
 	msg := protocolo.Mensagem{
@@ -2022,12 +2029,19 @@ func (s *Servidor) notificarResultadoJogada(sala *tipos.Sala, vencedorJogada str
 		}
 	}
 
-	// Coleta contagem de cartas (cada jogador tem seu próprio lock)
+	// Coleta contagem de cartas do mapa global (inventários atualizados)
 	contagemCartas := make(map[string]int)
 	for _, j := range jogadoresCopy {
-		j.Mutex.Lock()
-		contagemCartas[j.Nome] = len(j.Inventario)
-		j.Mutex.Unlock()
+		// Busca o jogador no mapa global para obter inventário atualizado
+		s.mutexClientes.RLock()
+		jogadorAtualizado := s.Clientes[j.ID]
+		s.mutexClientes.RUnlock()
+
+		if jogadorAtualizado != nil {
+			jogadorAtualizado.Mutex.Lock()
+			contagemCartas[j.Nome] = len(jogadorAtualizado.Inventario)
+			jogadorAtualizado.Mutex.Unlock()
+		}
 	}
 
 	// Cria a mensagem base
