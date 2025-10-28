@@ -1,5 +1,6 @@
 services:
   # ==================== BROKERS MQTT ====================
+  # A configuração dos brokers não muda. Eles apenas expõem a porta 1883.
   broker1:
     image: eclipse-mosquitto:latest
     container_name: broker1
@@ -25,14 +26,15 @@ services:
       - ./mosquitto/config:/mosquitto/config
 
   # ==================== SERVIDORES DE JOGO ====================
+  # A configuração dos servidores agora usa network_mode: "host" para
+  # permitir que eles usem o IP da máquina hospedeira diretamente.
   servidor1:
     build:
       context: .
       dockerfile: servidor/Dockerfile
     container_name: servidor1
     command: ["-addr", "172.16.103.14:8080", "-broker", "tcp://172.16.103.13:1883"]
-    ports:
-      - "8080:8080"
+    network_mode: "host" # <-- CORREÇÃO APLICADA
     restart: unless-stopped
     environment:
       - SERVER_ID=servidor1
@@ -44,8 +46,7 @@ services:
       dockerfile: servidor/Dockerfile
     container_name: servidor2
     command: ["-addr", "172.16.103.12:8080", "-broker", "tcp://172.16.103.10:1883"]
-    ports:
-      - "8080:8080"
+    network_mode: "host" # <-- CORREÇÃO APLICADA
     restart: unless-stopped
     environment:
       - SERVER_ID=servidor2
@@ -57,11 +58,10 @@ services:
       dockerfile: servidor/Dockerfile
     container_name: servidor3
     command: ["-addr", "172.16.103.9:8080", "-broker", "tcp://172.16.103.8:1883"]
-    ports:
-      - "8080:8080"
+    network_mode: "host" # <-- CORREÇÃO APLICADA
     restart: unless-stopped
     environment:
       - SERVER_ID=servidor3
       - PEERS=172.16.103.14:8080,172.16.103.12:8080,172.16.103.9:8080
 
-
+# A seção 'networks' foi removida pois não é mais necessária com o network_mode: "host".
