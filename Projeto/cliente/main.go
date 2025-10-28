@@ -40,9 +40,9 @@ func main() {
 
 	// --- LÓGICA DE ESCOLHA CORRIGIDA ---
 	serverMap := map[int]string{
-		1: "tcp://broker1:1883",
-		2: "tcp://broker2:1883",
-		3: "tcp://broker3:1883",
+		1: "tcp://172.16.103.13:1883",
+		2: "tcp://172.16.103.10:1883",
+		3: "tcp://172.16.103.8:1883",
 	}
 	fmt.Println("\nEscolha o servidor para conectar:")
 	fmt.Println("1. Servidor 1")
