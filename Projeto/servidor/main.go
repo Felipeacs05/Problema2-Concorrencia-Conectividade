@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"jogodistribuido/protocolo"
 	"jogodistribuido/servidor/api"
 	"jogodistribuido/servidor/cluster"
@@ -184,7 +185,7 @@ func (s *Servidor) AjustarContagemCartasLocal(clienteID string, msg *protocolo.M
 
 	// Decodifica a mensagem
 	var dados protocolo.DadosAtualizacaoJogo
-	json.Unmarshal([]byte(msg.Dados), &dados)
+	json.Unmarshal(msg.Dados, &dados)
 
 	// Inicializa contagem se necessário
 	if dados.ContagemCartas == nil {
@@ -234,8 +235,63 @@ func (s *Servidor) AtualizarEstadoSalaRemoto(estado tipos.EstadoPartida) {
 	}
 
 	sala.Mutex.Lock()
+
+	// Atualiza estado da sala
 	sala.Estado = estado.Estado
 	sala.TurnoDe = estado.TurnoDe
+
+	// ATUALIZA TAMBÉM OS INVENTÁRIOS DOS JOGADORES REAIS
+	// Importante: sincronizar as mudanças do estado para os jogadores reais do Shadow
+	if len(estado.Jogadores) > 0 {
+		log.Printf("[SYNC_SOMBRA] Recebido estado com %d jogadores para atualizar", len(estado.Jogadores))
+		for _, jogadorEstado := range estado.Jogadores {
+			log.Printf("[SYNC_SOMBRA] Procurando jogador %s para atualizar", jogadorEstado.ID)
+			// Atualiza inventário do jogador real se existir localmente
+			s.mutexClientes.RLock()
+			jogadorReal := s.Clientes[jogadorEstado.ID]
+			s.mutexClientes.RUnlock()
+
+			if jogadorReal != nil {
+				jogadorReal.Mutex.Lock()
+				// Sincroniza inventário do jogador real com o estado recebido
+				oldCount := len(jogadorReal.Inventario)
+				jogadorReal.Inventario = jogadorEstado.Inventario
+				jogadorReal.Mutex.Unlock()
+				log.Printf("[SYNC_SOMBRA] Inventário real atualizado para jogador local %s (%d -> %d cartas)", jogadorReal.Nome, oldCount, len(jogadorEstado.Inventario))
+
+				// Se o inventário mudou, notifica o cliente com o inventário atualizado
+				if oldCount != len(jogadorEstado.Inventario) {
+					log.Printf("[SYNC_SOMBRA] Inventário mudou! Notificando cliente %s com inventário atualizado", jogadorReal.Nome)
+					// Notifica com inventário atualizado para o jogador ver as mudanças
+					dados := protocolo.TrocarCartasResp{
+						Sucesso:              true,
+						Mensagem:             "Troca processada! Seu inventário foi atualizado.",
+						InventarioAtualizado: jogadorEstado.Inventario,
+					}
+					s.publicarParaCliente(jogadorReal.ID, protocolo.Mensagem{
+						Comando: "TROCA_CONCLUIDA",
+						Dados:   seguranca.MustJSON(dados),
+					})
+				}
+			} else {
+				log.Printf("[SYNC_SOMBRA] Jogador %s não encontrado no mapa de clientes", jogadorEstado.ID)
+			}
+		}
+	} else {
+		log.Printf("[SYNC_SOMBRA] Nenhum jogador no estado para atualizar")
+	}
+
+	// Atualiza cópias na sala
+	for i := range sala.Jogadores {
+		for _, jogadorEstado := range estado.Jogadores {
+			if sala.Jogadores[i].ID == jogadorEstado.ID {
+				sala.Jogadores[i].Inventario = jogadorEstado.Inventario
+				log.Printf("[SYNC_SOMBRA] Cópia na sala atualizada para jogador %s (%d cartas)", jogadorEstado.ID, len(jogadorEstado.Inventario))
+				break
+			}
+		}
+	}
+
 	sala.Mutex.Unlock()
 
 	log.Printf("[SYNC_SOMBRA_OK] Sala %s atualizada. Novo estado: %s, Turno de: %s", sala.ID, sala.Estado, sala.TurnoDe)
@@ -611,7 +667,7 @@ func (s *Servidor) handleComandoPartida(client mqtt.Client, msg mqtt.Message) {
 			go s.encaminharEventoParaHost(sala, dadosCliente.ClienteID, "CHAT", dadosEvento)
 		}
 
-	case "TROCAR_CARTAS":
+	case "TROCAR_CARTAS", "TROCAR_CARTAS_OFERTA":
 		var req protocolo.TrocarCartasReq
 		if err := json.Unmarshal(mensagem.Dados, &req); err != nil {
 			log.Printf("[TROCA_ERRO] Erro ao decodificar requisição de troca: %v", err)
@@ -1292,26 +1348,24 @@ func (s *Servidor) notificarInicioPartida(sala *tipos.Sala) {
 	// CORREÇÃO CRÍTICA: Buscar jogadores do mapa global para obter inventários atualizados
 	contagemCartas := make(map[string]int)
 	for _, j := range jogadoresCopy {
+		// Encontra o nome do jogador inicial para a mensagem
+		if j.ID == turnoDeID {
+			jogadorInicialNome = j.Nome
+		}
+
 		// Busca o jogador no mapa global para obter inventário atualizado
 		s.mutexClientes.RLock()
 		jogadorAtualizado := s.Clientes[j.ID]
 		s.mutexClientes.RUnlock()
 
 		if jogadorAtualizado != nil {
+			// Jogador está neste servidor - usa dados atuais
 			jogadorAtualizado.Mutex.Lock()
 			contagemCartas[j.Nome] = len(jogadorAtualizado.Inventario)
 			jogadorAtualizado.Mutex.Unlock()
-		} else {
-			// Se não encontrou no mapa global (jogador remoto), usa a cópia
-			j.Mutex.Lock()
-			contagemCartas[j.Nome] = len(j.Inventario)
-			j.Mutex.Unlock()
 		}
-
-		// Encontra o nome do jogador inicial para a mensagem
-		if j.ID == turnoDeID {
-			jogadorInicialNome = j.Nome
-		}
+		// Se jogador não está neste servidor (remoto), não inclui na contagem
+		// O Shadow irá preencher a contagem para seus jogadores locais
 	}
 
 	log.Printf("[JOGO_DEBUG] Partida %s iniciada. Jogador inicial: %s (%s)", sala.ID, jogadorInicialNome, turnoDeID)
@@ -1436,9 +1490,9 @@ func (s *Servidor) encaminharJogadaParaHost(sala *tipos.Sala, clienteID, cartaID
 		log.Printf("[SHADOW] Carta %s não encontrada no inventário de %s", cartaID, clienteID)
 		return
 	}
+	// Remove a carta do inventário local ANTES de enviar ao Host
+	cliente.Inventario = append(cliente.Inventario[:cartaIndex], cliente.Inventario[cartaIndex+1:]...)
 	cliente.Mutex.Unlock()
-
-	// Nota: Não remove a carta ainda - o Host vai processar e não tentará remover do inventário remoto
 
 	// Usa o novo endpoint /game/event
 	req := tipos.GameEventRequest{
@@ -1873,14 +1927,32 @@ func (s *Servidor) resolverJogada(sala *tipos.Sala) string {
 	// pelo processarEventoComoHost, para evitar que a goroutine inicie com o lock ativo
 
 	// CORREÇÃO: Verifica se acabaram as cartas DEPOIS de limpar a mesa
-	// Verifica se TODOS os jogadores têm cartas no inventário da sala
-	j1.Mutex.Lock()
-	j1Cartas := len(j1.Inventario)
-	j1.Mutex.Unlock()
+	// Busca jogadores do mapa global para contagem atualizada
+	s.mutexClientes.RLock()
+	j1Global := s.Clientes[j1.ID]
+	j2Global := s.Clientes[j2.ID]
+	s.mutexClientes.RUnlock()
 
-	j2.Mutex.Lock()
-	j2Cartas := len(j2.Inventario)
-	j2.Mutex.Unlock()
+	var j1Cartas, j2Cartas int
+	if j1Global != nil {
+		j1Global.Mutex.Lock()
+		j1Cartas = len(j1Global.Inventario)
+		j1Global.Mutex.Unlock()
+	} else {
+		j1.Mutex.Lock()
+		j1Cartas = len(j1.Inventario)
+		j1.Mutex.Unlock()
+	}
+
+	if j2Global != nil {
+		j2Global.Mutex.Lock()
+		j2Cartas = len(j2Global.Inventario)
+		j2Global.Mutex.Unlock()
+	} else {
+		j2.Mutex.Lock()
+		j2Cartas = len(j2.Inventario)
+		j2.Mutex.Unlock()
+	}
 
 	log.Printf("[VERIFICACAO_CARTAS:%s] Após jogada: %s tem %d cartas, %s tem %d cartas", sala.ID, j1.Nome, j1Cartas, j2.Nome, j2Cartas)
 
@@ -2198,54 +2270,500 @@ func (s *Servidor) broadcastChat(sala *tipos.Sala, texto, remetenteNome string) 
 
 // ==================== LÓGICA DE TROCA DE CARTAS ====================
 
-func (s *Servidor) processarTrocaCartas(sala *tipos.Sala, req *protocolo.TrocarCartasReq) {
-	log.Printf("[TROCA] Proposta recebida na sala %s", sala.ID)
+func (s *Servidor) ProcessarTrocaDireta(sala *tipos.Sala, req *protocolo.TrocarCartasReq) {
+	s.processarTrocaCartas(sala, req)
+}
 
-	// Apenas o Host coordena a troca
+// AplicarTrocaLocal remove a carta desejada do cliente local e adiciona a carta oferecida
+func (s *Servidor) BuscarCartaEmCliente(clienteID, cartaID string) tipos.Carta {
+	s.mutexClientes.RLock()
+	cliente := s.Clientes[clienteID]
+	s.mutexClientes.RUnlock()
+
+	if cliente == nil {
+		return tipos.Carta{}
+	}
+
+	cliente.Mutex.Lock()
+	var cartaEncontrada tipos.Carta
+	for _, c := range cliente.Inventario {
+		if c.ID == cartaID {
+			cartaEncontrada = c
+			break
+		}
+	}
+	cliente.Mutex.Unlock()
+
+	return cartaEncontrada
+}
+
+func (s *Servidor) AplicarTrocaLocal(clienteID string, idCartaDesejada string, cartaOferecida tipos.Carta) (bool, tipos.Carta, []tipos.Carta) {
+	log.Printf("[APLICAR_TROCA_LOCAL] Cliente: %s, removendo carta ID: %s, adicionando: %s", clienteID, idCartaDesejada, cartaOferecida.Nome)
+
+	s.mutexClientes.RLock()
+	cliente := s.Clientes[clienteID]
+	s.mutexClientes.RUnlock()
+	if cliente == nil {
+		log.Printf("[APLICAR_TROCA_LOCAL] Cliente %s não encontrado", clienteID)
+		return false, tipos.Carta{}, nil
+	}
+	cliente.Mutex.Lock()
+	defer cliente.Mutex.Unlock()
+
+	log.Printf("[APLICAR_TROCA_LOCAL] Inventário do cliente tem %d cartas", len(cliente.Inventario))
+
+	idx := -1
+	var cartaRemovida tipos.Carta
+	for i, c := range cliente.Inventario {
+		if c.ID == idCartaDesejada {
+			idx = i
+			cartaRemovida = c
+			log.Printf("[APLICAR_TROCA_LOCAL] Carta encontrada no índice %d: %s", i, c.Nome)
+			break
+		}
+	}
+	if idx == -1 {
+		log.Printf("[APLICAR_TROCA_LOCAL] Carta %s não encontrada no inventário", idCartaDesejada)
+		log.Printf("[APLICAR_TROCA_LOCAL] Inventário atual: %v", cliente.Inventario)
+		return false, tipos.Carta{}, nil
+	}
+	// Remove a carta do inventário
+	inv := make([]tipos.Carta, 0, len(cliente.Inventario))
+	inv = append(inv, cliente.Inventario[:idx]...)
+	inv = append(inv, cliente.Inventario[idx+1:]...)
+	// Adiciona a nova carta
+	inv = append(inv, cartaOferecida)
+	cliente.Inventario = inv
+	snapshot := make([]tipos.Carta, len(inv))
+	copy(snapshot, inv)
+	log.Printf("[APLICAR_TROCA_LOCAL] Inventário atualizado para %d cartas. Cartas atuais: %v", len(inv), inv)
+	return true, cartaRemovida, snapshot
+}
+
+func (s *Servidor) processarTrocaCartas(sala *tipos.Sala, req *protocolo.TrocarCartasReq) {
+	log.Printf("[TROCA] === INÍCIO PROCESSAMENTO TROCA FORÇADA ===")
+	log.Printf("[TROCA] Sala: %s", sala.ID)
+	log.Printf("[TROCA] Ofertante: %s (%s) -> carta: %s", req.NomeJogadorOferta, req.IDJogadorOferta, req.IDCartaOferecida)
+	log.Printf("[TROCA] Desejado: %s (%s) -> carta: %s", req.NomeJogadorDesejado, req.IDJogadorDesejado, req.IDCartaDesejada)
+
+	// NECESSÁRIO: Apenas o Host coordena a troca
 	if sala.ServidorHost != s.MeuEndereco {
-		// Lógica para encaminhar ao Host seria aqui, se necessário.
+		log.Printf("[TROCA] Shadow (servidor %s) encaminhando troca para o Host %s", s.MeuEndereco, sala.ServidorHost)
+		s.encaminharTrocaParaHost(sala.ServidorHost, sala.ID, req)
 		return
 	}
 
-	jogadorOferta := s.getClienteDaSala(sala, req.IDJogadorOferta)
-	jogadorDesejado := s.getClienteDaSala(sala, req.IDJogadorDesejado)
+	// Processa a troca no Host
+	log.Printf("[TROCA] Processando troca no Host")
+
+	// Busca jogadores
+	s.mutexClientes.RLock()
+	jogadorOferta := s.Clientes[req.IDJogadorOferta]
+	jogadorDesejado := s.Clientes[req.IDJogadorDesejado]
+	s.mutexClientes.RUnlock()
+
+	// Busca na sala se não encontrou no mapa global
+	if jogadorOferta == nil {
+		sala.Mutex.Lock()
+		for _, j := range sala.Jogadores {
+			if j.ID == req.IDJogadorOferta {
+				jogadorOferta = j
+				log.Printf("[TROCA] Jogador ofertante %s encontrado na cópia da sala", j.Nome)
+				break
+			}
+		}
+		sala.Mutex.Unlock()
+	}
+
+	if jogadorDesejado == nil {
+		sala.Mutex.Lock()
+		for _, j := range sala.Jogadores {
+			if j.ID == req.IDJogadorDesejado {
+				jogadorDesejado = j
+				log.Printf("[TROCA] Jogador desejado %s encontrado na cópia da sala", j.Nome)
+				break
+			}
+		}
+		sala.Mutex.Unlock()
+	}
 
 	if jogadorOferta == nil || jogadorDesejado == nil {
-		s.notificarErro(req.IDJogadorOferta, "Um dos jogadores da troca não foi encontrado.")
+		s.notificarErro(req.IDJogadorOferta, "Um dos jogadores não foi encontrado.")
 		return
 	}
 
-	cartaOferta, idxOferta := s.findCartaNoInventario(jogadorOferta, req.IDCartaOferecida)
-	cartaDesejada, idxDesejado := s.findCartaNoInventario(jogadorDesejado, req.IDCartaDesejada)
+	// Busca carta do ofertante
+	var cartaOferta tipos.Carta
+	idxOferta := -1
 
-	if idxOferta == -1 {
-		s.notificarErro(req.IDJogadorOferta, fmt.Sprintf("Você não tem a carta %s.", cartaOferta.Nome))
+	// Tenta no mapa real primeiro
+	s.mutexClientes.RLock()
+	jogadorReal := s.Clientes[req.IDJogadorOferta]
+	s.mutexClientes.RUnlock()
+
+	if jogadorReal != nil {
+		// Cliente local
+		jogadorReal.Mutex.Lock()
+		for i, c := range jogadorReal.Inventario {
+			if c.ID == req.IDCartaOferecida {
+				cartaOferta = c
+				idxOferta = i
+				break
+			}
+		}
+		jogadorReal.Mutex.Unlock()
+		log.Printf("[TROCA] Carta ofertante %s encontrada no inventário real (idx: %d)", cartaOferta.Nome, idxOferta)
+	} else {
+		// Cliente remoto - busca no servidor dele via HTTP
+		log.Printf("[TROCA] Jogador ofertante %s está remoto. Buscando carta via HTTP...", req.NomeJogadorOferta)
+
+		// Determina servidor do jogador ofertante
+		var servidorJogadorOferta string
+		if sala.ServidorHost == s.MeuEndereco {
+			// Sou Host, jogador remoto está na Sombra
+			servidorJogadorOferta = sala.ServidorSombra
+		} else {
+			// Sou Shadow, jogador remoto está no Host
+			servidorJogadorOferta = sala.ServidorHost
+		}
+
+		log.Printf("[TROCA] Buscando no servidor %s a carta %s do jogador %s", servidorJogadorOferta, req.IDCartaOferecida, req.IDJogadorOferta)
+
+		// Busca a carta no servidor remoto
+		payload := map[string]interface{}{
+			"cliente_id": req.IDJogadorOferta,
+			"carta_id":   req.IDCartaOferecida,
+		}
+		body, _ := json.Marshal(payload)
+
+		url := fmt.Sprintf("http://%s/partida/buscar_carta", servidorJogadorOferta)
+		resp, err := s.enviarRequestComToken("POST", url, body)
+		if err != nil {
+			log.Printf("[TROCA] Erro ao buscar carta do ofertante no remoto: %v", err)
+		} else if resp != nil {
+			defer resp.Body.Close()
+			if resp.StatusCode == 200 {
+				var result struct {
+					Encontrada bool        `json:"encontrada"`
+					Carta      tipos.Carta `json:"carta"`
+				}
+				if json.NewDecoder(resp.Body).Decode(&result) == nil && result.Encontrada {
+					cartaOferta = result.Carta
+					idxOferta = 99 // Placeholder para indicar que foi encontrada remotamente
+					log.Printf("[TROCA] Carta ofertante %s encontrada no servidor remoto", cartaOferta.Nome)
+				}
+			}
+		}
+
+		// Se ainda não encontrou, tenta na cópia da sala como fallback
+		if cartaOferta.ID == "" {
+			sala.Mutex.Lock()
+			for _, j := range sala.Jogadores {
+				if j.ID == req.IDJogadorOferta {
+					for i, c := range j.Inventario {
+						if c.ID == req.IDCartaOferecida {
+							cartaOferta = c
+							idxOferta = i
+							log.Printf("[TROCA] Carta ofertante %s encontrada na cópia da sala (fallback)", cartaOferta.Nome)
+							break
+						}
+					}
+					break
+				}
+			}
+			sala.Mutex.Unlock()
+		}
+	}
+
+	if cartaOferta.ID == "" {
+		s.notificarErro(req.IDJogadorOferta, "Você não possui esta carta.")
 		return
 	}
-	if idxDesejado == -1 {
-		s.notificarErro(req.IDJogadorOferta, fmt.Sprintf("%s não tem a carta %s.", jogadorDesejado.Nome, cartaDesejada.Nome))
+
+	// Busca carta desejada
+	var cartaDesejada tipos.Carta
+	s.mutexClientes.RLock()
+	jogadorDesejadoLocal := s.Clientes[req.IDJogadorDesejado]
+	s.mutexClientes.RUnlock()
+
+	if jogadorDesejadoLocal != nil {
+		// Jogador local - busca no inventário real
+		jogadorDesejadoLocal.Mutex.Lock()
+		for _, c := range jogadorDesejadoLocal.Inventario {
+			if c.ID == req.IDCartaDesejada {
+				cartaDesejada = c
+				break
+			}
+		}
+		jogadorDesejadoLocal.Mutex.Unlock()
+		log.Printf("[TROCA] Carta desejada %s encontrada no inventário real", cartaDesejada.Nome)
+	} else {
+		// Jogador está em outro servidor - busca no servidor remoto via HTTP
+		log.Printf("[TROCA] Jogador desejado %s está remoto. Buscando carta via HTTP no servidor dele...", req.NomeJogadorDesejado)
+
+		// Determina servidor do jogador desejado
+		var servidorJogadorDesejado string
+		if sala.ServidorHost == s.MeuEndereco {
+			// Sou Host, jogador remoto está na Sombra
+			servidorJogadorDesejado = sala.ServidorSombra
+		} else {
+			// Sou Shadow, jogador remoto está no Host
+			servidorJogadorDesejado = sala.ServidorHost
+		}
+
+		log.Printf("[TROCA] Buscando no servidor %s a carta %s do jogador %s", servidorJogadorDesejado, req.IDCartaDesejada, req.IDJogadorDesejado)
+
+		// Busca a carta no servidor remoto
+		payload := map[string]interface{}{
+			"cliente_id": req.IDJogadorDesejado,
+			"carta_id":   req.IDCartaDesejada,
+		}
+		body, _ := json.Marshal(payload)
+
+		url := fmt.Sprintf("http://%s/partida/buscar_carta", servidorJogadorDesejado)
+		resp, err := s.enviarRequestComToken("POST", url, body)
+		if err != nil {
+			log.Printf("[TROCA] Erro ao buscar carta no remoto: %v", err)
+		} else if resp != nil {
+			defer resp.Body.Close()
+			if resp.StatusCode == 200 {
+				var result struct {
+					Encontrada bool        `json:"encontrada"`
+					Carta      tipos.Carta `json:"carta"`
+				}
+				if json.NewDecoder(resp.Body).Decode(&result) == nil && result.Encontrada {
+					cartaDesejada = result.Carta
+					log.Printf("[TROCA] Carta desejada %s encontrada no servidor remoto", cartaDesejada.Nome)
+				}
+			}
+		}
+
+		// Se ainda não encontrou, tenta na cópia da sala como fallback
+		if cartaDesejada.ID == "" {
+			sala.Mutex.Lock()
+			for _, j := range sala.Jogadores {
+				if j.ID == req.IDJogadorDesejado {
+					log.Printf("[TROCA] Fallback: buscando carta %s no inventário de %s na cópia. Total: %d", req.IDCartaDesejada, j.Nome, len(j.Inventario))
+					for _, c := range j.Inventario {
+						if c.ID == req.IDCartaDesejada {
+							cartaDesejada = c
+							log.Printf("[TROCA] Carta desejada %s encontrada na cópia da sala", cartaDesejada.Nome)
+							break
+						}
+					}
+					break
+				}
+			}
+			sala.Mutex.Unlock()
+		}
+	}
+
+	if cartaDesejada.ID == "" {
+		s.notificarErro(req.IDJogadorOferta, fmt.Sprintf("%s não possui esta carta.", req.NomeJogadorDesejado))
 		return
 	}
 
-	// Executa a troca
-	jogadorOferta.Mutex.Lock()
-	jogadorDesejado.Mutex.Lock()
-	jogadorOferta.Inventario[idxOferta], jogadorDesejado.Inventario[idxDesejado] = jogadorDesejado.Inventario[idxDesejado], jogadorOferta.Inventario[idxOferta]
-	jogadorDesejado.Mutex.Unlock()
-	jogadorOferta.Mutex.Unlock()
+	// EXECUTA A TROCA - Remove carta do ofertante e adiciona carta desejada
+	var novoInventario []tipos.Carta
 
-	log.Printf("[TROCA] Troca realizada com sucesso entre %s e %s.", jogadorOferta.Nome, jogadorDesejado.Nome)
+	if jogadorReal != nil && idxOferta != 99 {
+		// Atualiza inventário real do jogador local
+		jogadorReal.Mutex.Lock()
+		inventario := jogadorReal.Inventario
+		inventario = append(inventario[:idxOferta], inventario[idxOferta+1:]...)
+		inventario = append(inventario, cartaDesejada)
+		jogadorReal.Inventario = inventario
+		novoInventario = make([]tipos.Carta, len(inventario))
+		copy(novoInventario, inventario)
+		jogadorReal.Mutex.Unlock()
+		log.Printf("[TROCA] Inventário real do ofertante atualizado: %d cartas", len(inventario))
+	} else if idxOferta == 99 {
+		// Carta foi encontrada em servidor remoto - precisa aplicar remoto
+		log.Printf("[TROCA] Carta do ofertante veio do servidor remoto. Aplicando troca remota...")
 
-	// Notifica ambos os jogadores
-	s.notificarSucessoTroca(jogadorOferta.ID, cartaOferta.Nome, cartaDesejada.Nome)
-	s.notificarSucessoTroca(jogadorDesejado.ID, cartaDesejada.Nome, cartaOferta.Nome)
+		// Determina servidor do jogador ofertante
+		var servidorJogadorOferta string
+		if sala.ServidorHost == s.MeuEndereco {
+			servidorJogadorOferta = sala.ServidorSombra
+		} else {
+			servidorJogadorOferta = sala.ServidorHost
+		}
 
-	// Sincroniza estado com a Sombra
-	if sala.ServidorSombra != "" {
-		sala.Mutex.Lock()
-		estado := s.criarEstadoDaSala(sala)
-		sala.Mutex.Unlock()
-		go s.sincronizarEstadoComSombra(sala.ServidorSombra, estado)
+		// Aplica troca no servidor remoto do ofertante
+		// Remove carta oferecida e adiciona carta desejada
+		payload := map[string]interface{}{
+			"cliente_id":        req.IDJogadorOferta,
+			"carta_desejada_id": req.IDCartaOferecida, // Carta que será REMOVIDA
+			"carta_oferecida":   cartaDesejada,        // Carta que será ADICIONADA
+		}
+		log.Printf("[TROCA] Aplicando troca remota: removendo %s e adicionando %s", req.IDCartaOferecida, cartaDesejada.Nome)
+		body, _ := json.Marshal(payload)
+
+		url := fmt.Sprintf("http://%s/partida/aplicar_troca_local", servidorJogadorOferta)
+		log.Printf("[TROCA] Chamando %s", url)
+		resp, err := s.enviarRequestComToken("POST", url, body)
+		if err != nil {
+			log.Printf("[TROCA] Erro ao aplicar troca no ofertante remoto: %v", err)
+		} else if resp != nil {
+			defer resp.Body.Close()
+			if resp.StatusCode == 200 {
+				var result struct {
+					Status     string        `json:"status"`
+					Inventario []tipos.Carta `json:"inventario"`
+				}
+				decoder := json.NewDecoder(resp.Body)
+				if err := decoder.Decode(&result); err == nil {
+					novoInventario = result.Inventario
+					log.Printf("[TROCA] Inventário atualizado recebido do ofertante remoto: %d cartas", len(novoInventario))
+					log.Printf("[TROCA] Primeira carta: %+v", result.Inventario[0])
+				} else {
+					log.Printf("[TROCA] Erro ao decodificar resposta: %v", err)
+					// Lê o body para debug
+					bodyBytes, _ := io.ReadAll(resp.Body)
+					log.Printf("[TROCA] Resposta raw: %s", string(bodyBytes))
+				}
+			} else {
+				log.Printf("[TROCA] Status code: %d", resp.StatusCode)
+			}
+			log.Printf("[TROCA] Troca aplicada no ofertante remoto com sucesso")
+		}
+	}
+
+	// Se jogador desejado está local, executa a troca reversa
+	if jogadorDesejadoLocal != nil {
+		// Remove carta desejada e adiciona carta oferecida
+		jogadorDesejadoLocal.Mutex.Lock()
+		inventario := jogadorDesejadoLocal.Inventario
+		idxDesejado := -1
+		for i, c := range inventario {
+			if c.ID == req.IDCartaDesejada {
+				idxDesejado = i
+				break
+			}
+		}
+		if idxDesejado != -1 {
+			inventario = append(inventario[:idxDesejado], inventario[idxDesejado+1:]...)
+			inventario = append(inventario, cartaOferta)
+			jogadorDesejadoLocal.Inventario = inventario
+		}
+		inventarioDesejado := make([]tipos.Carta, len(inventario))
+		copy(inventarioDesejado, inventario)
+		jogadorDesejadoLocal.Mutex.Unlock()
+		log.Printf("[TROCA] Inventário real do desejado atualizado: %d cartas", len(inventario))
+
+		// Notifica ambos
+		s.notificarSucessoTrocaComInventario(req.IDJogadorOferta, cartaOferta.Nome, cartaDesejada.Nome, novoInventario)
+		s.notificarSucessoTrocaComInventario(req.IDJogadorDesejado, cartaDesejada.Nome, cartaOferta.Nome, inventarioDesejado)
+	} else {
+		// Jogador desejado é remoto - solicita ao servidor dele aplicar a troca
+		log.Printf("[TROCA] Jogador desejado é remoto. Enviando para aplicar troca...")
+		payload := map[string]interface{}{
+			"cliente_id":        req.IDJogadorDesejado,
+			"carta_desejada_id": req.IDCartaDesejada,
+			"carta_oferecida":   cartaOferta,
+		}
+		body, _ := json.Marshal(payload)
+
+		// Determina servidor destino - lógica corrigida:
+		// Se sou Host, jogador remoto está na Sombra
+		// Se sou Shadow, jogador remoto está no Host
+		servidorDestino := sala.ServidorSombra
+		if s.MeuEndereco == sala.ServidorHost {
+			// Sou Host, remoto está na Sombra
+			servidorDestino = sala.ServidorSombra
+		} else {
+			// Sou Shadow, remoto está no Host
+			servidorDestino = sala.ServidorHost
+		}
+
+		url := fmt.Sprintf("http://%s/partida/aplicar_troca_local", servidorDestino)
+		log.Printf("[TROCA] Enviando para %s", url)
+		resp, err := s.enviarRequestComToken("POST", url, body)
+		if err != nil {
+			log.Printf("[TROCA] Falha ao aplicar troca no remoto %s: %v", servidorDestino, err)
+		} else if resp != nil {
+			defer resp.Body.Close()
+			log.Printf("[TROCA] Troca aplicada com sucesso no remoto")
+		}
+
+		// Notifica ambos os jogadores (a notificação para o desejado já foi enviada pelo aplicador remoto)
+		log.Printf("[TROCA] Notificando ofertante com inventário de %d cartas", len(novoInventario))
+		s.notificarSucessoTrocaComInventario(req.IDJogadorOferta, cartaOferta.Nome, cartaDesejada.Nome, novoInventario)
+	}
+
+	// Atualiza a cópia da sala
+	sala.Mutex.Lock()
+	for i := range sala.Jogadores {
+		if sala.Jogadores[i].ID == req.IDJogadorOferta {
+			sala.Jogadores[i].Inventario = novoInventario
+			log.Printf("[TROCA] Cópia da sala atualizada para %s", req.NomeJogadorOferta)
+			break
+		}
+	}
+	sala.Mutex.Unlock()
+
+	// Se o ofertante é local, também atualiza o inventário real
+	s.mutexClientes.RLock()
+	clienteOferta := s.Clientes[req.IDJogadorOferta]
+	s.mutexClientes.RUnlock()
+	if clienteOferta != nil {
+		clienteOferta.Mutex.Lock()
+		clienteOferta.Inventario = novoInventario
+		clienteOferta.Mutex.Unlock()
+		log.Printf("[TROCA] Inventário real do ofertante local atualizado para %d cartas", len(novoInventario))
+	}
+
+	log.Printf("[TROCA] === FIM PROCESSAMENTO TROCA === %s trocou %s por %s com %s", req.NomeJogadorOferta, cartaOferta.Nome, cartaDesejada.Nome, req.NomeJogadorDesejado)
+}
+
+// encaminharTrocaParaHost envia uma requisição de troca de cartas do Shadow para o Host via HTTP
+func (s *Servidor) encaminharTrocaParaHost(hostAddr, salaID string, req *protocolo.TrocarCartasReq) {
+	log.Printf("[TROCA_SHADOW] Encaminhando requisição de troca para o Host %s na sala %s", hostAddr, salaID)
+
+	// Cria a mensagem de comando para encaminhar
+	comando := protocolo.Mensagem{
+		Comando: "TROCAR_CARTAS",
+		Dados:   seguranca.MustJSON(req),
+	}
+
+	// Cria o payload para o endpoint
+	payload := map[string]interface{}{
+		"sala_id": salaID,
+		"comando": comando,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("[TROCA_SHADOW] Erro ao serializar requisição: %v", err)
+		return
+	}
+
+	url := fmt.Sprintf("http://%s/partida/encaminhar_comando", hostAddr)
+
+	// Cria cliente HTTP com timeout reduzido
+	token := seguranca.GenerateJWT(s.MeuEndereco)
+	httpReq, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Printf("[TROCA_SHADOW] Erro ao criar request: %v", err)
+		return
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+
+	// Timeout mais curto para evitar travamentos
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		log.Printf("[TROCA_SHADOW] Erro ao encaminhar: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		log.Printf("[TROCA_SHADOW] Troca encaminhada com sucesso ao Host")
+	} else {
+		log.Printf("[TROCA_SHADOW] Host retornou status %d", resp.StatusCode)
 	}
 }
 
@@ -2271,6 +2789,18 @@ func (s *Servidor) findCartaNoInventario(cliente *tipos.Cliente, cartaID string)
 	return Carta{}, -1
 }
 
+func cartasIguais(a, b []tipos.Carta) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].ID != b[i].ID {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Servidor) notificarErro(clienteID string, mensagem string) {
 	s.publicarParaCliente(clienteID, protocolo.Mensagem{
 		Comando: "ERRO",
@@ -2281,6 +2811,16 @@ func (s *Servidor) notificarErro(clienteID string, mensagem string) {
 func (s *Servidor) notificarSucessoTroca(clienteID, cartaPerdida, cartaGanha string) {
 	msg := fmt.Sprintf("Troca realizada! Você deu '%s' e recebeu '%s'.", cartaPerdida, cartaGanha)
 	resp := protocolo.TrocarCartasResp{Sucesso: true, Mensagem: msg}
+	s.publicarParaCliente(clienteID, protocolo.Mensagem{Comando: "TROCA_CONCLUIDA", Dados: seguranca.MustJSON(resp)})
+}
+
+func (s *Servidor) notificarSucessoTrocaComInventario(clienteID, cartaPerdida, cartaGanha string, inventario []tipos.Carta) {
+	msg := fmt.Sprintf("Troca realizada! Você deu '%s' e recebeu '%s'.", cartaPerdida, cartaGanha)
+	resp := protocolo.TrocarCartasResp{
+		Sucesso:              true,
+		Mensagem:             msg,
+		InventarioAtualizado: inventario,
+	}
 	s.publicarParaCliente(clienteID, protocolo.Mensagem{Comando: "TROCA_CONCLUIDA", Dados: seguranca.MustJSON(resp)})
 }
 
@@ -2320,9 +2860,18 @@ func (s *Servidor) criarEstadoDaSala(sala *tipos.Sala) *tipos.EstadoPartida {
 
 	// Cria contagem de cartas atualizada
 	contagemCartas := make(map[string]int)
+	jogadoresEstado := make([]tipos.JogadorEstado, 0, len(sala.Jogadores))
+
 	for _, j := range sala.Jogadores {
 		j.Mutex.Lock()
 		contagemCartas[j.Nome] = len(j.Inventario)
+		// Adiciona jogador ao estado com seu inventário
+		invCopy := make([]tipos.Carta, len(j.Inventario))
+		copy(invCopy, j.Inventario)
+		jogadoresEstado = append(jogadoresEstado, tipos.JogadorEstado{
+			ID:         j.ID,
+			Inventario: invCopy,
+		})
 		j.Mutex.Unlock()
 	}
 
@@ -2338,6 +2887,7 @@ func (s *Servidor) criarEstadoDaSala(sala *tipos.Sala) *tipos.EstadoPartida {
 		Prontos:       sala.Prontos,
 		EventSeq:      sala.EventSeq,
 		EventLog:      sala.EventLog,
+		Jogadores:     jogadoresEstado,
 	}
 }
 

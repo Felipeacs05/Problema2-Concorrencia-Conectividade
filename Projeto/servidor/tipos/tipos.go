@@ -66,6 +66,12 @@ type EstadoPartida struct {
 	EventLog       []GameEvent      `json:"eventLog"`        // Log de eventos
 	TurnoDe        string           `json:"turnoDe"`         // ID do jogador que deve jogar
 	VencedorJogada string           `json:"vencedor_jogada"` // Vencedor da jogada (se houver)
+	Jogadores      []JogadorEstado  `json:"jogadores"`       // Inventários dos jogadores (para sincronização)
+}
+
+type JogadorEstado struct {
+	ID         string  `json:"id"`
+	Inventario []Carta `json:"inventario"`
 }
 
 // GameStartRequest representa a requisição para iniciar uma partida

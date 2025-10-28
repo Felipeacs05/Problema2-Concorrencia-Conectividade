@@ -230,6 +230,11 @@ func processarMensagemServidor(msg protocolo.Mensagem) {
 		var resp protocolo.TrocarCartasResp
 		json.Unmarshal(msg.Dados, &resp)
 		fmt.Printf("\n[TROCA] %s\n", resp.Mensagem)
+		// Atualiza o inventário se fornecido
+		if len(resp.InventarioAtualizado) > 0 {
+			meuInventario = resp.InventarioAtualizado
+			log.Printf("[TROCA] Inventário atualizado com %d cartas", len(meuInventario))
+		}
 		mostrarCartas() // Mostra o inventário atualizado
 		fmt.Print("> ")
 

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"jogodistribuido/protocolo"
 	"jogodistribuido/servidor/seguranca"
 	"jogodistribuido/servidor/tipos"
@@ -179,6 +180,32 @@ func (s *Server) handleEncaminharComando(c *gin.Context) {
 
 	log.Printf("[ENCAMINHAMENTO_RX] Comando '%s' recebido para a sala %s", req.Comando.Comando, req.SalaID)
 
+	// Processa troca de cartas DIRETAMENTE no handler HTTP (já veio do Shadow)
+	if req.Comando.Comando == "TROCAR_CARTAS" {
+		var trocaReq protocolo.TrocarCartasReq
+		if err := json.Unmarshal(req.Comando.Dados, &trocaReq); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Dados de troca inválidos"})
+			return
+		}
+
+		// Acessa a sala diretamente da interface
+		salas := s.servidor.GetSalas()
+		if salas == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Salas não disponível"})
+			return
+		}
+		sala := salas[req.SalaID]
+		if sala == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Sala não encontrada"})
+			return
+		}
+
+		// Processa a troca imediatamente
+		s.servidor.ProcessarTrocaDireta(sala, &trocaReq)
+		c.JSON(http.StatusOK, gin.H{"status": "troca processada"})
+		return
+	}
+
 	// Injeta o comando no canal da partida para ser processado pelo Host
 	if err := s.servidor.ProcessarComandoRemoto(req.SalaID, req.Comando); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
@@ -235,6 +262,63 @@ func (s *Server) handleAtualizarEstado(c *gin.Context) {
 
 func (s *Server) handleNotificarPronto(c *gin.Context) {
 	// ... (código a ser movido)
+}
+
+// Aplica a troca localmente para um cliente deste servidor: remove a carta desejada dele e adiciona a carta oferecida
+func (s *Server) handleAplicarTrocaLocal(c *gin.Context) {
+	var req struct {
+		ClienteID       string      `json:"cliente_id"`
+		CartaDesejadaID string      `json:"carta_desejada_id"`
+		CartaOferecida  tipos.Carta `json:"carta_oferecida"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Payload inválido"})
+		return
+	}
+
+	aplicado, cartaRemovida, inventario := s.servidor.AplicarTrocaLocal(req.ClienteID, req.CartaDesejadaID, req.CartaOferecida)
+	if !aplicado {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "nao_aplicado"})
+		return
+	}
+	log.Printf("[APLICAR_TROCA_LOCAL] Retornando inventário com %d cartas", len(inventario))
+
+	// Notifica o cliente local com o inventário atualizado
+	resp := protocolo.TrocarCartasResp{
+		Sucesso:              true,
+		Mensagem:             fmt.Sprintf("Troca realizada! Você deu '%s' e recebeu '%s'.", cartaRemovida.Nome, req.CartaOferecida.Nome),
+		InventarioAtualizado: inventario,
+	}
+	s.servidor.PublicarParaCliente(req.ClienteID, protocolo.Mensagem{Comando: "TROCA_CONCLUIDA", Dados: seguranca.MustJSON(resp)})
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "inventario": inventario})
+}
+
+// handleBuscarCarta busca uma carta específica no inventário de um cliente
+func (s *Server) handleBuscarCarta(c *gin.Context) {
+	var req struct {
+		ClienteID string `json:"cliente_id"`
+		CartaID   string `json:"carta_id"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Payload inválido"})
+		return
+	}
+
+	log.Printf("[BUSCAR_CARTA_RX] Buscando carta %s para cliente %s", req.CartaID, req.ClienteID)
+
+	// Busca a carta usando a interface do servidor
+	cartaEncontrada := s.servidor.BuscarCartaEmCliente(req.ClienteID, req.CartaID)
+
+	if cartaEncontrada.ID == "" {
+		log.Printf("[BUSCAR_CARTA] Carta %s não encontrada", req.CartaID)
+		c.JSON(http.StatusOK, gin.H{"encontrada": false})
+		return
+	}
+
+	log.Printf("[BUSCAR_CARTA] Carta %s encontrada: %s", req.CartaID, cartaEncontrada.Nome)
+	c.JSON(http.StatusOK, gin.H{"encontrada": true, "carta": cartaEncontrada})
 }
 
 // HANDLERS DE MATCHMAKING GLOBAL

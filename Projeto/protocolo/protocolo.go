@@ -41,8 +41,9 @@ type TrocarCartasReq struct {
 }
 
 type TrocarCartasResp struct {
-	Sucesso  bool   `json:"sucesso"`
-	Mensagem string `json:"mensagem"`
+	Sucesso              bool    `json:"sucesso"`
+	Mensagem             string  `json:"mensagem"`
+	InventarioAtualizado []Carta `json:"inventario_atualizado,omitempty"`
 }
 
 /* ===================== Login / Match / Chat ===================== */

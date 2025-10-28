@@ -27,6 +27,9 @@ type ServidorInterface interface {
 	PublicarChatRemoto(salaID, nomeJogador, texto string) // Adicionado para chat cross-server
 	GetSalas() map[string]*tipos.Sala
 	ProcessarEventoComoHost(sala *tipos.Sala, evento *tipos.GameEventRequest) *tipos.EstadoPartida
+	ProcessarTrocaDireta(sala *tipos.Sala, req *protocolo.TrocarCartasReq)
+	AplicarTrocaLocal(clienteID string, idCartaDesejada string, cartaOferecida tipos.Carta) (bool, tipos.Carta, []tipos.Carta)
+	BuscarCartaEmCliente(clienteID, cartaID string) tipos.Carta
 }
 
 type Server struct {
@@ -106,5 +109,7 @@ func (s *Server) setupRoutes() {
 		partida.POST("/iniciar_remoto", s.handleIniciarRemoto)
 		partida.POST("/atualizar_estado", s.handleAtualizarEstado)
 		partida.POST("/notificar_pronto", s.handleNotificarPronto)
+		partida.POST("/aplicar_troca_local", s.handleAplicarTrocaLocal)
+		partida.POST("/buscar_carta", s.handleBuscarCarta)
 	}
 }
