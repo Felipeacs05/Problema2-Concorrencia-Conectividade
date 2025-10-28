@@ -30,7 +30,7 @@ services:
       context: .
       dockerfile: servidor/Dockerfile
     container_name: servidor1
-    command: ["-addr", "172.16.103.14:8080", "-broker", "tcp://IP_BROKER1:1883"]
+    command: ["-addr", "172.16.103.14:8080", "-broker", "tcp://172.16.103.13:1883"]
     ports:
       - "8080:8080"
     restart: unless-stopped
@@ -43,7 +43,7 @@ services:
       context: .
       dockerfile: servidor/Dockerfile
     container_name: servidor2
-    command: ["-addr", "172.16.103.12:8080", "-broker", "tcp://IP_BROKER2:1883"]
+    command: ["-addr", "172.16.103.12:8080", "-broker", "tcp://172.16.103.10:1883"]
     ports:
       - "8080:8080"
     restart: unless-stopped
@@ -56,7 +56,7 @@ services:
       context: .
       dockerfile: servidor/Dockerfile
     container_name: servidor3
-    command: ["-addr", "172.16.103.9:8080", "-broker", "tcp://IP_BROKER3:1883"]
+    command: ["-addr", "172.16.103.9:8080", "-broker", "tcp://172.16.103.8:1883"]
     ports:
       - "8080:8080"
     restart: unless-stopped
